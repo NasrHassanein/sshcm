@@ -29,6 +29,16 @@ section="$(printf '%s\n' "$section" | sed -e '/./,$!d' | sed -e ':a' -e '/^\n*$/
 cat <<EOF
 $section
 
+## Install
+
+\`\`\`sh
+curl -fsSL https://github.com/NasrHassanein/sshcm/releases/download/$tag/install.sh | sh -s -- --version $tag
+\`\`\`
+
+This installs \`sshcm\` into \`~/.local/bin\`, adds it to \`PATH\` in your shell's
+startup file if needed, and sets up completion for bash, zsh or fish (add
+\`--shell bash|zsh|fish\` to choose). See the README for details.
+
 ## Download
 
 | Platform | x86_64 | aarch64 |
@@ -37,7 +47,9 @@ $section
 | macOS | \`sshcm-$tag-x86_64-apple-darwin.tar.gz\` | \`sshcm-$tag-aarch64-apple-darwin.tar.gz\` (Apple silicon) |
 
 Each archive contains the \`sshcm\` binary, shell completions (bash, zsh,
-fish, elvish, PowerShell), and a man page (\`sshcm.1\`).
+fish, elvish, PowerShell), a man page (\`sshcm.1\`), and \`install.sh\`, which
+installs those files without network access when run from the extracted
+directory.
 
 \`\`\`sh
 sha256sum -c sshcm-$tag-<target>.tar.gz.sha256      # macOS: shasum -a 256 -c …

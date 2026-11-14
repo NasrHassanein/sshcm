@@ -691,6 +691,29 @@ mod whole_config {
             .success()
             .stdout(predicate::str::contains(".TH sshcm"));
     }
+
+    /// `sshcm completions zsh | head` must end quietly, not panic, when the
+    /// reader closes the pipe early.
+    #[test]
+    fn closed_stdout_pipe_is_not_an_error() {
+        use std::io::Read;
+        use std::process::Stdio;
+        for args in [["completions", "zsh"], ["completions", "fish"]] {
+            let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("sshcm"))
+                .args(args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut first = [0u8; 16];
+            child.stdout.take().unwrap().read_exact(&mut first).unwrap();
+            // The read end is dropped here, closing the pipe.
+            let out = child.wait_with_output().unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{args:?}: {:?} {stderr}", out.status);
+            assert!(!stderr.contains("panicked"), "{args:?}: {stderr}");
+        }
+    }
 }
 
 /// Editing a file ssh already rejects (here: not an ssh config at all) is

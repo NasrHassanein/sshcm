@@ -1,6 +1,5 @@
 # Builds release archives for Linux and macOS (x86_64 and aarch64) when a
 # version tag (v*) is pushed, and attaches them to a GitHub release.
-# Untested until the first tag.
 name: Release
 
 on:
@@ -43,7 +42,7 @@ jobs:
           name="sshcm-${GITHUB_REF_NAME}-${{ matrix.target }}"
           bin="target/${{ matrix.target }}/release/sshcm"
           mkdir -p "$name/completions"
-          cp "$bin" README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$name/"
+          cp "$bin" install.sh README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$name/"
           # Completions and the man page need a binary that runs here; the
           # cross-compiled Intel macOS build falls back to a host build.
           host_bin="$bin"
@@ -86,4 +85,8 @@ jobs:
         with:
           name: sshcm ${{ steps.notes.outputs.version }}
           body_path: ${{ runner.temp }}/notes.md
-          files: sshcm-*.tar.gz*
+          # install.sh is also attached on its own, so
+          # releases/latest/download/install.sh always matches the latest binaries.
+          files: |
+            sshcm-*.tar.gz*
+            install.sh

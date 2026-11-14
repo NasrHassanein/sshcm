@@ -24,7 +24,7 @@ jobs:
     name: Check (fmt, clippy, docs)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -39,7 +39,7 @@ jobs:
     name: MSRV (1.89)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.89
       - uses: Swatinem/rust-cache@v2
       # Dev-dependencies may need a newer toolchain; MSRV covers shipped code.
@@ -49,7 +49,7 @@ jobs:
     name: Licenses & advisories
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   test:
@@ -63,7 +63,7 @@ jobs:
           - { name: macos-aarch64, os: macos-latest }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install rustup (ARM images may lack it)
         uses: ./.github/actions/ensure-rustup
       - uses: dtolnay/rust-toolchain@stable
@@ -86,7 +86,7 @@ jobs:
           - { target: aarch64-apple-darwin, os: macos-latest, native: true }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install rustup (ARM images may lack it)
         uses: ./.github/actions/ensure-rustup
       - uses: dtolnay/rust-toolchain@stable

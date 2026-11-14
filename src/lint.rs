@@ -292,7 +292,7 @@ const INTEGERS: &[&str] = &[
 /// Time values: `30`, `1m`, `1h30m` (units s, m, h, d, w).
 const TIMES: &[&str] = &["ConnectTimeout", "ForwardX11Timeout", "ServerAliveInterval"];
 
-fn check_value(kw: &str, args: &[String]) -> Option<String> {
+pub(crate) fn check_value(kw: &str, args: &[String]) -> Option<String> {
     let single_valued = kw == "Port"
         || FLAGS.contains(&kw)
         || INTEGERS.contains(&kw)

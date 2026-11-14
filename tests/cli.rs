@@ -894,3 +894,136 @@ mod forwarding {
             .stdout(predicate::str::contains("same local endpoint `5432`"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// parse view | add
+// ---------------------------------------------------------------------------
+
+mod parse {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn sandbox_from(name: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        fs::copy(fixture(name), &config).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        let p = config.to_str().unwrap().to_owned();
+        (dir, p)
+    }
+
+    #[test]
+    fn view_prints_the_record_for_the_users_example() {
+        sshcm(&fixture("basic"))
+            .args(["parse", "view", "ssh -i ~/.ssh/id_rsa user@host"])
+            .assert()
+            .success()
+            .stdout("Host host\n    User user\n    IdentityFile ~/.ssh/id_rsa\n")
+            .stderr("");
+    }
+
+    #[test]
+    fn show_alias_as_name_and_unquoted_form() {
+        sshcm(&fixture("basic"))
+            .args([
+                "parse",
+                "show",
+                "--as",
+                "db",
+                "ssh alice@db.example.com -p 2222",
+            ])
+            .assert()
+            .success()
+            .stdout("Host db\n    HostName db.example.com\n    User alice\n    Port 2222\n");
+        sshcm(&fixture("basic"))
+            .args(["parse", "view", "ssh", "-p", "2200", "bob@h"])
+            .assert()
+            .success()
+            .stdout("Host h\n    User bob\n    Port 2200\n");
+    }
+
+    #[test]
+    fn view_uses_the_files_style() {
+        // comments_and_globals.config indents with tabs.
+        sshcm(&fixture("comments_and_globals"))
+            .args(["parse", "view", "ssh -p 22 u@h"])
+            .assert()
+            .success()
+            .stdout("Host h\n\tUser u\n\tPort 22\n");
+    }
+
+    #[test]
+    fn one_off_flags_and_remote_command_become_notes() {
+        sshcm(&fixture("basic"))
+            .args(["parse", "view", "ssh -v -N -A h uptime"])
+            .assert()
+            .success()
+            .stdout("Host h\n    ForwardAgent yes\n")
+            .stderr(predicate::str::contains(
+                "`-v` affects a single invocation; not written",
+            ))
+            .stderr(predicate::str::contains("`-N` affects a single invocation"))
+            .stderr(predicate::str::contains(
+                "remote command `uptime` is not part of the record",
+            ));
+    }
+
+    #[test]
+    fn add_writes_the_users_second_example() {
+        let (dir, cfg) = sandbox_from("basic");
+        sshcm(&cfg)
+            .args(["parse", "add", "-y", "ssh -i ~/.ssh/id_rsa user@host -p 22"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                "+Host host\n+    User user\n+    Port 22\n+    IdentityFile ~/.ssh/id_rsa\n",
+            ));
+        let text = fs::read_to_string(&cfg).unwrap();
+        assert!(text.contains(
+            "Host host\n    User user\n    Port 22\n    IdentityFile ~/.ssh/id_rsa\n\nHost *"
+        ));
+        assert!(dir.path().join(".sshcm/backups").is_dir());
+
+        // Adding it again is refused, with a hint.
+        sshcm(&cfg)
+            .args(["parse", "add", "-y", "ssh user@host"])
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains("`host` already exists"))
+            .stderr(predicate::str::contains("use --as NAME"));
+        sshcm(&cfg)
+            .args(["parse", "add", "-y", "--as", "host2", "ssh user@host"])
+            .assert()
+            .success();
+        assert!(
+            fs::read_to_string(&cfg)
+                .unwrap()
+                .contains("Host host2\n    HostName host\n    User user\n")
+        );
+    }
+
+    #[test]
+    fn bad_input_fails_before_anything_is_written() {
+        let (_d, cfg) = sandbox_from("basic");
+        let original = fs::read_to_string(&cfg).unwrap();
+        for (cmd, msg) in [
+            ("ssh -o Bogus=1 h", "unknown keyword `Bogus`"),
+            ("ssh -v", "no destination host"),
+            ("ssh -J a -J b h", "only a single -J"),
+            ("ssh 'unterminated h", "unterminated ' quote"),
+        ] {
+            sshcm(&cfg)
+                .args(["parse", "add", "-y", cmd])
+                .assert()
+                .code(1)
+                .stderr(predicate::str::contains(msg));
+        }
+        sshcm(&cfg)
+            .args(["parse", "add", "ssh user@x", "-y"])
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains("must be one quoted argument"));
+        assert_eq!(fs::read_to_string(&cfg).unwrap(), original);
+    }
+}

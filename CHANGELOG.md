@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0 — unreleased
+
+From ssh commands to config records.
+
+- New `sshcm parse view "SSH_COMMAND"` (alias `show`) prints the Host
+  record for an `ssh …` command, in the config file's own style; `sshcm
+  parse add "SSH_COMMAND"` adds it (diff, confirmation, validation, backup).
+- The alias defaults to the destination host; `--as NAME` names the entry
+  and adds `HostName`.
+- All connection flags are mapped, including forwards, `user@host`, and
+  `ssh://user@host:port`, with ssh's exact precedence for repeated settings
+  (verified: OpenSSH resolves each generated record exactly like the
+  original command).
+- One-off flags (`-v`, `-N`, `-f`, …) and remote commands are reported, not
+  written; `-o` values are checked with the same rules as `lint`.
+
 ## 0.2.0 — 2026-11-14
 
 Forwarding support.

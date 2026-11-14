@@ -16,6 +16,7 @@
 #[cfg(not(unix))]
 compile_error!("sshcm supports Unix-like systems (Linux, macOS) only");
 
+pub mod command;
 pub mod diagnostic;
 pub mod edit;
 pub mod format;

@@ -84,7 +84,9 @@ fn snapshot_edit(
     let original = fixture(fixture_name);
     let mut doc = Document::parse(&original);
     f(&mut doc).unwrap();
-    let diff = similar::TextDiff::from_lines(&original, &doc.render())
+    let edited = doc.render();
+    // `&str` arguments work with both similar 2.x and 3.x signatures.
+    let diff = similar::TextDiff::from_lines(original.as_str(), edited.as_str())
         .unified_diff()
         .context_radius(2)
         .to_string();

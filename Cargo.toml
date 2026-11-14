@@ -9,7 +9,6 @@ keywords = ["ssh", "config", "cli", "openssh"]
 categories = ["command-line-utilities", "config"]
 readme = "README.md"
 repository = "https://github.com/NasrHassanein/sshcm"
-homepage = "https://github.com/NasrHassanein/sshcm"
 
 [lib]
 path = "src/lib.rs"

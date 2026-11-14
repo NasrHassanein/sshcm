@@ -4,6 +4,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Its refs name Rust toolchains (`@stable`, `@1.89` = our MSRV), not
+      # action versions; Dependabot would "bump" the MSRV pin to a
+      # nonexistent toolchain (it proposed 1.89 -> 1.120).
+      - dependency-name: dtolnay/rust-toolchain
   - package-ecosystem: cargo
     directory: /
     schedule:

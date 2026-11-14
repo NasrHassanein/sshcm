@@ -60,7 +60,7 @@ jobs:
         run: |
           tar czf "${{ steps.stage.outputs.name }}.tar.gz" "${{ steps.stage.outputs.name }}"
           shasum -a 256 "${{ steps.stage.outputs.name }}.tar.gz" > "${{ steps.stage.outputs.name }}.tar.gz.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: sshcm-*.tar.gz*

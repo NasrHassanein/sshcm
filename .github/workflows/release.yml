@@ -71,10 +71,19 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+      # Notes come from the tag's CHANGELOG.md section (the step fails if
+      # there is none), plus download/verify instructions.
+      - name: Release notes
+        id: notes
+        run: |
+          .github/scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
       - uses: softprops/action-gh-release@v3
         with:
+          name: sshcm ${{ steps.notes.outputs.version }}
+          body_path: ${{ runner.temp }}/notes.md
           files: sshcm-*.tar.gz*
-          generate_release_notes: true

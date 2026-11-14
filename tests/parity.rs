@@ -152,3 +152,75 @@ fn include_resolution_matches_ssh_g() {
     }
     assert!(compared >= 10, "compared only {compared}");
 }
+
+/// Forwarding parity: for every host in `forwards.config`, the forwards we
+/// resolve, printed in ssh's normalized form, must equal `ssh -G` output
+/// exactly. `ssh -G` also prints a phantom `dynamicforward <listen>` for
+/// each local forward whose target is a Unix socket (a dump quirk, not a
+/// real forward); those lines are subtracted before comparing.
+#[test]
+fn forward_resolution_matches_ssh_g() {
+    use sshcm::model::forward::{Endpoint, Forward, ForwardKind};
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/forwards.config");
+    let set = ConfigSet::single(
+        &path,
+        Document::parse(&std::fs::read_to_string(&path).unwrap()),
+    );
+    let rctx = ResolveContext {
+        local_user: "me".into(),
+    };
+    let mut compared = 0;
+
+    for host in ["db", "jump", "docker", "other"] {
+        let Some(ssh) = ssh_g(&path, host) else {
+            eprintln!("note: `ssh` not available; skipping forwarding parity");
+            return;
+        };
+        let ours: Vec<Forward> = resolve(&set, host, &rctx)
+            .settings
+            .iter()
+            .filter_map(|s| {
+                Forward::from_config(ForwardKind::from_keyword(&s.keyword)?, &s.args).ok()
+            })
+            .collect();
+        let phantoms: Vec<String> = ours
+            .iter()
+            .filter(|f| {
+                f.kind == ForwardKind::Local && matches!(f.target, Some(Endpoint::Socket { .. }))
+            })
+            .map(|f| f.ssh_g_form().split(' ').next().unwrap().to_owned())
+            .collect();
+
+        for kind in [
+            ForwardKind::Local,
+            ForwardKind::Remote,
+            ForwardKind::Dynamic,
+        ] {
+            let key = kind.keyword().to_ascii_lowercase();
+            let mut theirs: Vec<String> = ssh
+                .iter()
+                .filter(|(k, _)| *k == key)
+                .map(|(_, v)| v.clone())
+                .collect();
+            if kind == ForwardKind::Dynamic {
+                for p in &phantoms {
+                    if let Some(i) = theirs.iter().position(|v| v == p) {
+                        theirs.remove(i);
+                    }
+                }
+            }
+            let mine: Vec<String> = ours
+                .iter()
+                .filter(|f| f.kind == kind)
+                .map(Forward::ssh_g_form)
+                .collect();
+            assert_eq!(mine, theirs, "{key} for `{host}`");
+            compared += mine.len();
+        }
+    }
+    assert_eq!(
+        compared, 10,
+        "every forward in the fixture was compared (db 2, jump 5, docker 3)"
+    );
+}

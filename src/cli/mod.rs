@@ -11,17 +11,18 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{CommandFactory, Parser};
 use sshcm::edit::{self, EditError, Position};
 use sshcm::format::FormatOptions;
 use sshcm::hosts::find_alias_in;
 use sshcm::include::{ConfigSet, IncludeContext};
 use sshcm::io::lock::LockError;
+use sshcm::model::forward::{Forward, parse_listen};
 use sshcm::model::value::quote;
 use sshcm::syntax::Document;
 
-use args::{BackupAction, Cli, Command};
+use args::{BackupAction, Cli, Command, ForwardAction, ForwardSpecs, WriteOpts};
 use commands::{display, format_diagnostics};
 use mutate::{ValidationFailed, transaction};
 
@@ -113,7 +114,7 @@ fn ensure_absent(set: &ConfigSet, alias: &str) -> Result<()> {
 
 /// The options and position for `add`, from its flags: the dedicated
 /// flags first (in `ssh_config`'s conventional order), then `-o` options.
-fn add_args(cmd: &Command) -> (Vec<(String, String)>, Position) {
+fn add_args(cmd: &Command) -> Result<(Vec<(String, String)>, Position)> {
     let Command::Add {
         hostname,
         user,
@@ -122,6 +123,7 @@ fn add_args(cmd: &Command) -> (Vec<(String, String)>, Position) {
         options,
         before,
         after,
+        forwards,
         ..
     } = cmd
     else {
@@ -140,12 +142,71 @@ fn add_args(cmd: &Command) -> (Vec<(String, String)>, Position) {
     .filter_map(|(k, v)| v.map(|v| (k.to_owned(), v)))
     .collect();
     opts.extend(options.iter().cloned());
+    for f in parse_forwards(forwards)? {
+        opts.push((f.keyword().to_owned(), f.to_config_value()));
+    }
     let position = match (before, after) {
         (Some(a), _) => Position::Before(a.clone()),
         (_, Some(a)) => Position::After(a.clone()),
         _ => Position::Auto,
     };
-    (opts, position)
+    Ok((opts, position))
+}
+
+/// Parse `-L/-R/-D` specs (ssh command-line syntax).
+fn parse_forwards(specs: &ForwardSpecs) -> Result<Vec<Forward>> {
+    specs
+        .iter()
+        .map(|(kind, spec)| {
+            Forward::from_cli(kind, spec).with_context(|| format!("-{} {spec}", kind.flag()))
+        })
+        .collect()
+}
+
+/// `forward list | add | rm`. Edits go to the file that defines the alias.
+fn forward_command(path: &Path, w: &WriteOpts, action: &ForwardAction) -> Result<()> {
+    let need_specs = |specs: &ForwardSpecs| {
+        if specs.is_empty() {
+            bail!("give at least one of -L, -R, -D");
+        }
+        Ok(())
+    };
+    match action {
+        ForwardAction::List { alias, json } => {
+            print!(
+                "{}",
+                commands::forward_list(&load_set(path, false)?, alias.as_deref(), *json)?
+            );
+        }
+        ForwardAction::Add { alias, specs } => {
+            need_specs(specs)?;
+            let forwards = parse_forwards(specs)?;
+            let target = owner(&load_set(path, false)?, alias)?;
+            transaction(&target, w, alias, |d| {
+                forwards
+                    .iter()
+                    .try_for_each(|f| edit::add_forward(d, alias, f))
+            })?;
+        }
+        ForwardAction::Rm { alias, specs } => {
+            need_specs(specs)?;
+            let listens = specs
+                .iter()
+                .map(|(kind, spec)| {
+                    parse_listen(kind, spec)
+                        .map(|e| (kind, e))
+                        .with_context(|| format!("-{} {spec}", kind.flag()))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let target = owner(&load_set(path, false)?, alias)?;
+            transaction(&target, w, alias, |d| {
+                listens
+                    .iter()
+                    .try_for_each(|(kind, listen)| edit::remove_forward(d, alias, *kind, listen))
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn run(cli: &Cli) -> Result<()> {
@@ -204,6 +265,7 @@ fn run(cli: &Cli) -> Result<()> {
             BackupAction::List => ops::backup_list(&path)?,
             BackupAction::Restore { id } => ops::backup_restore(&path, id, w)?,
         },
+        Command::Forward { action } => forward_command(&path, w, action)?,
         Command::Completions { .. } | Command::Manpage => unreachable!("handled above"),
         _ => edit_command(cli, &path)?,
     }
@@ -247,7 +309,7 @@ fn edit_command(cli: &Cli, path: &Path) -> Result<()> {
     match &cli.command {
         Command::Add { alias, .. } => {
             ensure_absent(&load_set(&path, true)?, alias)?;
-            let (opts, position) = add_args(&cli.command);
+            let (opts, position) = add_args(&cli.command)?;
             transaction(&path, w, alias, |d| {
                 edit::add_host(d, alias, &opts, &position)
             })?;
@@ -295,7 +357,11 @@ fn exit_code(e: &anyhow::Error) -> u8 {
     if e.downcast_ref::<NotFound>().is_some()
         || matches!(
             e.downcast_ref::<EditError>(),
-            Some(EditError::AliasNotFound(_) | EditError::KeyNotSet { .. })
+            Some(
+                EditError::AliasNotFound(_)
+                    | EditError::KeyNotSet { .. }
+                    | EditError::ForwardNotFound { .. }
+            )
         )
     {
         exit::NOT_FOUND

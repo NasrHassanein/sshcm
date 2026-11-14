@@ -8,9 +8,10 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use crate::include::ConfigSet;
+use crate::model::forward::{Forward, ForwardError, ForwardKind};
 use crate::model::pattern::HostPatterns;
 use crate::model::value::split_args;
-use crate::syntax::{Block, BlockKind, Document};
+use crate::syntax::{Block, BlockKind, Document, Line};
 
 /// A summary of one `Host` block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -30,6 +31,28 @@ pub struct HostEntry {
     pub port: Option<String>,
     /// Every `IdentityFile` in the block.
     pub identity_files: Vec<String>,
+    /// Every parsable `LocalForward`/`RemoteForward`/`DynamicForward`, in
+    /// order (malformed ones are reported by `lint`, not listed).
+    pub forwards: Vec<Forward>,
+    /// `ForwardAgent` is enabled (`yes`, a socket path, or `$ENV`).
+    pub forward_agent: bool,
+    /// `ForwardX11` is enabled.
+    pub forward_x11: bool,
+}
+
+/// The forward a directive line describes: `None` if the line is not a
+/// forwarding keyword, `Some(Err)` if it is but ssh would reject it.
+pub fn forward_of(line: &Line) -> Option<Result<Forward, ForwardError>> {
+    let kind = ForwardKind::from_keyword(line.keyword()?)?;
+    let args = match split_args(line.value().unwrap_or_default()) {
+        Ok(a) => a,
+        Err(e) => return Some(Err(ForwardError::Bad(e.to_string()))),
+    };
+    Some(Forward::from_config(kind, &args))
+}
+
+fn enabled(value: Option<String>, off: &[&str]) -> bool {
+    value.is_some_and(|v| !off.iter().any(|o| v.eq_ignore_ascii_case(o)))
 }
 
 /// The `Host` line's patterns of `block`, or `None` for non-`Host` blocks or
@@ -106,6 +129,13 @@ fn entry(doc: &Document, idx: usize) -> HostEntry {
         user: values("User").next(),
         port: values("Port").next(),
         identity_files: values("IdentityFile").collect(),
+        forwards: body
+            .iter()
+            .filter_map(forward_of)
+            .filter_map(Result::ok)
+            .collect(),
+        forward_agent: enabled(values("ForwardAgent").next(), &["no", "false"]),
+        forward_x11: enabled(values("ForwardX11").next(), &["no", "false"]),
     }
 }
 
@@ -152,6 +182,24 @@ mod tests {
         assert_eq!(e[0].user, None); // global User is not part of the block
         assert_eq!(e[1].patterns, ["*.x", "!a"]);
         assert_eq!(e[1].port.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn forwards_and_agent_x11() {
+        let doc = Document::parse(
+            "Host a\n  LocalForward 8080 db:80\n  LocalForward 8080:bad\n  RemoteForward 1080\n  ForwardAgent ~/agent.sock\n  ForwardX11 no\nHost b\n  ForwardX11 yes\n",
+        );
+        let e = host_entries(&doc);
+        let shorts: Vec<_> = e[0].forwards.iter().map(Forward::short).collect();
+        assert_eq!(
+            shorts,
+            ["L8080→db:80", "R1080(socks)"],
+            "malformed line skipped"
+        );
+        assert!(e[0].forward_agent, "a socket path enables agent forwarding");
+        assert!(!e[0].forward_x11);
+        assert!(!e[1].forward_agent);
+        assert!(e[1].forward_x11);
     }
 
     #[test]

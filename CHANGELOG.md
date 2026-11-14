@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0 — unreleased
+
+Forwarding support.
+
+- New `sshcm forward list | add | rm` for every forwarding shape OpenSSH
+  supports: local, remote, dynamic (SOCKS), reverse dynamic, and Unix
+  sockets, with bind addresses and IPv6. Specs use `ssh -L/-R/-D` syntax
+  and are written in config syntax; `forward rm` removes one tunnel by its
+  listen side.
+- `sshcm add` accepts `-L`, `-R`, and `-D`.
+- `sshcm list` has a FORWARDS column (up to two forwards, `+N`, and `A`/`X`
+  for agent and X11 forwarding); `--json` includes structured forwards.
+- `lint` validates every forward exactly as ssh does (E002) and warns when
+  two forwards for a host listen on the same endpoint (W007).
+
 ## 0.1.0 — 2026-11-14
 
 First release.

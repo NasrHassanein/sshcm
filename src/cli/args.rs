@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use sshcm::model::forward::ForwardKind;
 
 #[derive(Debug, Parser)]
 #[command(name = "sshcm", version, about, arg_required_else_help = true)]
@@ -99,6 +100,8 @@ pub enum Command {
         /// Any other option, e.g. -o ProxyJump=bastion (repeatable)
         #[arg(short = 'o', long = "option", value_name = "KEY=VALUE", value_parser = parse_kv)]
         options: Vec<(String, String)>,
+        #[command(flatten)]
+        forwards: ForwardSpecs,
         /// Insert before this alias's block
         #[arg(long, value_name = "ALIAS", conflicts_with = "after")]
         before: Option<String>,
@@ -151,6 +154,13 @@ pub enum Command {
         src: String,
         /// New alias
         dst: String,
+    },
+
+    /// Manage port and socket forwarding (LocalForward, RemoteForward, DynamicForward)
+    #[command(visible_alias = "fwd")]
+    Forward {
+        #[command(subcommand)]
+        action: ForwardAction,
     },
 
     /// Check the config for errors ssh would reject and likely mistakes
@@ -215,6 +225,72 @@ pub enum Command {
     /// Print how the config file was parsed (developer aid)
     #[command(hide = true)]
     DumpSyntax,
+}
+
+/// `-L/-R/-D` in ssh's own command-line syntax; written to the config in
+/// config syntax (`-L 8080:db:80` becomes `LocalForward 8080 db:80`).
+#[derive(Debug, Args, Clone, Default)]
+pub struct ForwardSpecs {
+    /// Local forward: [bind:]port:host:hostport, or with Unix socket paths (repeatable)
+    #[arg(short = 'L', long = "local", value_name = "SPEC")]
+    pub local: Vec<String>,
+    /// Remote forward: [bind:]port:host:hostport, or [bind:]port for a remote SOCKS proxy (repeatable)
+    #[arg(short = 'R', long = "remote", value_name = "SPEC")]
+    pub remote: Vec<String>,
+    /// Dynamic (SOCKS) forward: [bind:]port (repeatable)
+    #[arg(short = 'D', long = "dynamic", value_name = "SPEC")]
+    pub dynamic: Vec<String>,
+}
+
+impl ForwardSpecs {
+    /// `(kind, spec)` pairs in -L, -R, -D order.
+    pub fn iter(&self) -> impl Iterator<Item = (ForwardKind, &str)> {
+        self.local
+            .iter()
+            .map(|s| (ForwardKind::Local, s.as_str()))
+            .chain(
+                self.remote
+                    .iter()
+                    .map(|s| (ForwardKind::Remote, s.as_str())),
+            )
+            .chain(
+                self.dynamic
+                    .iter()
+                    .map(|s| (ForwardKind::Dynamic, s.as_str())),
+            )
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.local.is_empty() && self.remote.is_empty() && self.dynamic.is_empty()
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ForwardAction {
+    /// List forwards of every host, or of one alias
+    #[command(visible_alias = "ls")]
+    List {
+        /// Only this alias
+        alias: Option<String>,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add forwards, e.g. `forward add db -L 5432:localhost:5432 -D 1080`
+    Add {
+        /// The alias whose block to edit
+        alias: String,
+        #[command(flatten)]
+        specs: ForwardSpecs,
+    },
+    /// Remove forwards by listen endpoint, e.g. `forward rm db -L 5432 -D 1080`
+    #[command(visible_alias = "remove")]
+    Rm {
+        /// The alias whose block to edit
+        alias: String,
+        #[command(flatten)]
+        specs: ForwardSpecs,
+    },
 }
 
 #[derive(Debug, Subcommand)]

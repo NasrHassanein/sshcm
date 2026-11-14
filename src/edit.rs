@@ -133,15 +133,40 @@ pub fn add_host(
 ) -> Result<(), EditError> {
     validate_alias(alias)?;
     ensure_absent(doc, alias)?;
-    let options = options
+    let options = checked_options(options)?;
+    insert_host_block(doc, &[alias.to_owned()], &options, position)
+}
+
+/// The text `add_host` would insert for `alias`, in this document's style
+/// (indent, separator, `Host` spelling, line endings), without blank-line
+/// separators. Used by `parse view` so it prints exactly what `parse add`
+/// writes.
+///
+/// # Errors
+/// If the alias is invalid, a keyword is unknown/reserved, or a value is
+/// invalid. Whether the alias already exists is not checked.
+pub fn render_host_block(
+    doc: &Document,
+    alias: &str,
+    options: &[(String, String)],
+) -> Result<String, EditError> {
+    validate_alias(alias)?;
+    let options = checked_options(options)?;
+    Ok(host_block_lines(doc, &[alias.to_owned()], &options)
+        .iter()
+        .map(Line::to_string)
+        .collect())
+}
+
+fn checked_options(options: &[(String, String)]) -> Result<Vec<(String, String)>, EditError> {
+    options
         .iter()
         .map(|(k, v)| {
             let kw = settable_keyword(k)?;
             validate_value(kw, v)?;
             Ok((kw.to_owned(), v.clone()))
         })
-        .collect::<Result<Vec<_>, EditError>>()?;
-    insert_host_block(doc, &[alias.to_owned()], &options, position)
+        .collect()
 }
 
 /// Add a `Host` block with any pattern list (e.g. `*` or `web-* !web-old`),
@@ -216,6 +241,18 @@ fn insert_host_block(
         Position::After(a) => block_extent(doc, first_block(doc, a)?).end,
     };
 
+    let lines = host_block_lines(doc, patterns, options);
+    insert_block(doc, at, lines, Style::of(doc).separated);
+    Ok(())
+}
+
+/// The lines of a new `Host` block in `doc`'s style. Shared by insertion and
+/// `render_host_block`, so what `parse view` shows is what `add` writes.
+fn host_block_lines(
+    doc: &Document,
+    patterns: &[String],
+    options: &[(String, String)],
+) -> Vec<Line> {
     let style = Style::of(doc);
     let eol = doc.preferred_eol();
     let header: Vec<_> = patterns.iter().map(|p| quote(p)).collect();
@@ -231,8 +268,7 @@ fn insert_host_block(
             .iter()
             .map(|(k, v)| Line::directive(&style.indent, k, &style.sep, v, eol)),
     );
-    insert_block(doc, at, lines, style.separated);
-    Ok(())
+    lines
 }
 
 /// Set `key` to `value` in the block for `alias`.
@@ -948,6 +984,18 @@ mod tests {
             "kind must match too"
         );
         assert_eq!(d.render(), input);
+    }
+
+    #[test]
+    fn render_matches_what_add_inserts() {
+        let input = "Host a\n\tUser x\r\n";
+        let opts = kv(&[("HostName", "h.example"), ("Port", "2222")]);
+        let doc = Document::parse(input);
+        let shown = render_host_block(&doc, "new", &opts).unwrap();
+        assert_eq!(shown, "Host new\n\tHostName h.example\n\tPort 2222\n");
+        let mut d = doc.clone();
+        add_host(&mut d, "new", &opts, &Position::Auto).unwrap();
+        assert!(d.render().contains(&shown), "{:?}", d.render());
     }
 
     #[test]

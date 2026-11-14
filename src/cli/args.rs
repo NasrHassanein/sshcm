@@ -163,6 +163,12 @@ pub enum Command {
         action: ForwardAction,
     },
 
+    /// Turn an `ssh …` command into a Host record: `view` prints it, `add` writes it
+    Parse {
+        #[command(subcommand)]
+        action: ParseAction,
+    },
+
     /// Check the config for errors ssh would reject and likely mistakes
     Lint {
         /// Also fail (exit 4) on warnings
@@ -290,6 +296,35 @@ pub enum ForwardAction {
         alias: String,
         #[command(flatten)]
         specs: ForwardSpecs,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ParseAction {
+    /// Print the Host record for an ssh command, as it would be written
+    #[command(visible_alias = "show")]
+    View {
+        /// Name the entry ALIAS (adds HostName); default: the destination host
+        #[arg(long = "as", value_name = "ALIAS")]
+        alias: Option<String>,
+        /// The ssh command, quoted as one argument: "ssh -i KEY user@host -p 22"
+        #[arg(required = true, num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true, value_name = "SSH_COMMAND")]
+        command: Vec<String>,
+    },
+    /// Add the Host record for an ssh command to the config
+    Add {
+        /// Name the entry ALIAS (adds HostName); default: the destination host
+        #[arg(long = "as", value_name = "ALIAS")]
+        alias: Option<String>,
+        /// Insert before this alias's block
+        #[arg(long, value_name = "ALIAS", conflicts_with = "after")]
+        before: Option<String>,
+        /// Insert after this alias's block
+        #[arg(long, value_name = "ALIAS")]
+        after: Option<String>,
+        /// The ssh command, quoted as one argument: "ssh -i KEY user@host -p 22"
+        #[arg(required = true, num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true, value_name = "SSH_COMMAND")]
+        command: Vec<String>,
     },
 }
 

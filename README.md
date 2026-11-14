@@ -81,6 +81,7 @@ edits are written unvalidated, with a warning).
 | `sshcm lint [--strict] [--json]` | Errors ssh would reject, and likely mistakes |
 | `sshcm fmt [--check] [--indent N \| --tabs] [--all]` | Opt-in normalisation; the only command that rewrites style |
 | `sshcm export` / `sshcm import FILE [--skip-existing]` | JSON interchange of Host blocks |
+| `sshcm parse view [--as A] "SSH_COMMAND"` / `sshcm parse add [--as A] "SSH_COMMAND"` | Turn an `ssh …` command into a Host record: print it, or add it |
 | `sshcm forward list [ALIAS]` / `forward add ALIAS -L/-R/-D SPEC…` / `forward rm ALIAS -L/-R/-D LISTEN…` | Port and socket forwarding in `ssh -L/-R/-D` syntax |
 | `sshcm backup list` / `sshcm backup restore [latest \| N \| NAME]` | Manage backups (a restore is itself backed up) |
 | `sshcm completions SHELL` | Shell completion script |
@@ -88,6 +89,36 @@ edits are written unvalidated, with a warning).
 Every command that writes accepts `--dry-run` (show the diff only), `-y`
 (no prompt; also implied when stdin is not a terminal), `--no-backup`, and
 `--no-validate`. `-F PATH` (or `SSHCM_CONFIG`) selects another config file.
+
+### From an ssh command
+
+Have a working `ssh` command? `parse` turns it into a config record:
+
+```console
+$ sshcm parse view "ssh -i ~/.ssh/id_rsa user@host"
+Host host
+    User user
+    IdentityFile ~/.ssh/id_rsa
+
+$ sshcm parse add --as db "ssh -v -A -J bastion alice@db.example.com -p 2222 uptime"
+note: `-v` affects a single invocation; not written to the config
+note: remote command `uptime` is not part of the record; `ssh db` opens a shell
+(diff, confirmation, write)
+```
+
+- The alias defaults to the destination host; `--as NAME` names the entry
+  and adds `HostName`. `view` prints exactly what `add` would write, in your
+  file's indentation style. `show` is an alias for `view`.
+- Every connection flag maps to its config keyword (`-i -p -l -J -L -R -D -A
+  -a -X -x -Y -C -4 -6 -g -K -k -M -c -m -b -B -e -S -w -P -I -o`), and
+  `user@host` and `ssh://user@host:port` are understood.
+- When a setting is given twice, ssh's own precedence applies (`-p 1 -p 2`
+  is port 1, `-A -a` is no agent forwarding, `-o` never overrides an
+  earlier flag). The test suite checks that for each sample command OpenSSH
+  resolves the record exactly like the original command line.
+- One-off flags (`-v -q -f -N -n -t -T -s`) and flags with no config form
+  (`-E -W -F -O -Q -G -V`) are skipped with a note, as is a remote command.
+- Quote the command as one argument and put sshcm's own options before it.
 
 ### Forwarding
 

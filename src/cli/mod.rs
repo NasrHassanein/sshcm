@@ -13,6 +13,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{CommandFactory, Parser};
+use sshcm::command::{parse_ssh_command, shell_split};
 use sshcm::edit::{self, EditError, Position};
 use sshcm::format::FormatOptions;
 use sshcm::hosts::find_alias_in;
@@ -22,7 +23,7 @@ use sshcm::model::forward::{Forward, parse_listen};
 use sshcm::model::value::quote;
 use sshcm::syntax::Document;
 
-use args::{BackupAction, Cli, Command, ForwardAction, ForwardSpecs, WriteOpts};
+use args::{BackupAction, Cli, Command, ForwardAction, ForwardSpecs, ParseAction, WriteOpts};
 use commands::{display, format_diagnostics};
 use mutate::{ValidationFailed, transaction};
 
@@ -209,6 +210,67 @@ fn forward_command(path: &Path, w: &WriteOpts, action: &ForwardAction) -> Result
     Ok(())
 }
 
+/// The ssh command's words: one quoted argument is shell-split; several
+/// arguments are words the shell already split.
+fn command_words(args: &[String]) -> Result<Vec<String>> {
+    match args {
+        [one] => Ok(shell_split(one)?),
+        [first, ..] if first.contains(char::is_whitespace) => bail!(
+            "the ssh command must be one quoted argument, with sshcm options before it \
+             (e.g. `sshcm parse add -y \"ssh user@host\"`)"
+        ),
+        words => Ok(words.to_vec()),
+    }
+}
+
+/// `parse view | add`.
+fn parse_command(path: &Path, w: &WriteOpts, action: &ParseAction) -> Result<()> {
+    let (alias, command) = match action {
+        ParseAction::View { alias, command } | ParseAction::Add { alias, command, .. } => {
+            (alias, command)
+        }
+    };
+    let parsed = parse_ssh_command(&command_words(command)?).context("parsing the ssh command")?;
+    let alias = alias.clone().unwrap_or_else(|| parsed.host.clone());
+    let options = parsed.options_for(&alias);
+
+    for s in &parsed.skipped {
+        eprintln!("note: {s}; not written to the config");
+    }
+    if let Some(cmd) = &parsed.remote_command {
+        eprintln!(
+            "note: remote command `{cmd}` is not part of the record; `ssh {alias}` opens a shell"
+        );
+    }
+
+    let set = load_set(path, true)?;
+    match action {
+        ParseAction::View { .. } => {
+            if let Err(e) = ensure_absent(&set, &alias) {
+                eprintln!("note: {e:#}; `parse add` would refuse it (use --as NAME)");
+            }
+            print!(
+                "{}",
+                edit::render_host_block(&set.root().doc, &alias, &options)?
+            );
+        }
+        ParseAction::Add { before, after, .. } => {
+            if let Err(e) = ensure_absent(&set, &alias) {
+                bail!("{e:#}; use --as NAME to add it under another alias");
+            }
+            let position = match (before, after) {
+                (Some(a), _) => Position::Before(a.clone()),
+                (_, Some(a)) => Position::After(a.clone()),
+                _ => Position::Auto,
+            };
+            transaction(path, w, &alias, |d| {
+                edit::add_host(d, &alias, &options, &position)
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn run(cli: &Cli) -> Result<()> {
     // Commands that don't touch a config file.
     match &cli.command {
@@ -266,6 +328,7 @@ fn run(cli: &Cli) -> Result<()> {
             BackupAction::Restore { id } => ops::backup_restore(&path, id, w)?,
         },
         Command::Forward { action } => forward_command(&path, w, action)?,
+        Command::Parse { action } => parse_command(&path, w, action)?,
         Command::Completions { .. } | Command::Manpage => unreachable!("handled above"),
         _ => edit_command(cli, &path)?,
     }

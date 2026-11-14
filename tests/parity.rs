@@ -224,3 +224,75 @@ fn forward_resolution_matches_ssh_g() {
         "every forward in the fixture was compared (db 2, jump 5, docker 3)"
     );
 }
+
+/// `parse`: for each command, OpenSSH must resolve the generated record
+/// exactly as it resolves the original command line:
+/// `ssh -G -F /dev/null <command>` == `ssh -G -F <record> <host>`.
+/// This is the strongest possible check of the flag mapping and of ssh's
+/// precedence rules (first-wins vs last-wins vs accumulate).
+#[test]
+fn parse_record_means_what_the_command_meant() {
+    use sshcm::command::{parse_ssh_command, shell_split};
+    use sshcm::edit::render_host_block;
+
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("id_test");
+    std::fs::write(&key, "").unwrap();
+    let key = key.display().to_string();
+
+    let commands = [
+        format!("ssh -i {key} user@host"),
+        format!("ssh -i {key} user@host -p 22"),
+        "ssh -l bob alice@h -p 2222 -p 1".to_owned(),
+        "ssh alice@h -l bob".to_owned(),
+        "ssh -A -a -X -Y -4 -C -g h".to_owned(),
+        "ssh -o ForwardAgent=yes -a -o Ciphers=aes256-ctr -c aes128-ctr h".to_owned(),
+        "ssh -J bastion -L 8080:db:80 -R 1080 -D 127.0.0.1:1081 u@h".to_owned(),
+        "ssh -K -k -M -M h".to_owned(),
+        "ssh -e none -b 10.0.0.1 -B eth0 -S /tmp/cp -m hmac-sha2-256 -w 1:2 -P tag h".to_owned(),
+        "ssh ssh://alice@h:2022".to_owned(),
+        "ssh -o 'ProxyCommand ssh -W %h:%p j' -o User=x -l y h".to_owned(),
+        "ssh a@b@h".to_owned(),
+        "ssh h -p 2222 -A".to_owned(),
+        "ssh -o 'LocalForward 1 a:1' -L 2:b:2 h".to_owned(),
+        "ssh -o ControlMaster=auto -M -o AddressFamily=inet6 -4 -x -X -6 h".to_owned(),
+    ];
+
+    let ssh_g = |args: &[&str]| -> Option<String> {
+        let out = Command::new("ssh")
+            .arg("-G")
+            .args(args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        assert!(out.status.success(), "ssh -G {args:?} failed");
+        Some(String::from_utf8(out.stdout).unwrap())
+    };
+
+    for cmd in &commands {
+        let words = shell_split(cmd).unwrap();
+        let parsed = parse_ssh_command(&words).unwrap();
+        let record = render_host_block(
+            &Document::parse(""),
+            &parsed.host,
+            &parsed.options_for(&parsed.host),
+        )
+        .unwrap();
+        let file = dir.path().join("record");
+        std::fs::write(&file, &record).unwrap();
+
+        let mut cli_args = vec!["-F", "/dev/null"];
+        cli_args.extend(words[1..].iter().map(String::as_str));
+        let Some(from_command) = ssh_g(&cli_args) else {
+            eprintln!("note: `ssh` not available; skipping parse parity");
+            return;
+        };
+        let from_record = ssh_g(&["-F", file.to_str().unwrap(), &parsed.host]).unwrap();
+        // ssh -G dump quirk: compression enabled by the `-C` flag prints as
+        // `compression UNKNOWN`, while `Compression yes` prints `yes`. Same
+        // setting; normalize only that line, compare everything else as is.
+        let from_command = from_command.replace("compression UNKNOWN\n", "compression yes\n");
+        assert_eq!(from_record, from_command, "`{cmd}` vs record:\n{record}");
+    }
+}

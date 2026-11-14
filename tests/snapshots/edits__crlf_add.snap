@@ -1,0 +1,13 @@
+---
+source: tests/edits.rs
+expression: diff
+---
+@@ -3,4 +3,8 @@
+     User admin
+ 
++Host new
++    HostName 10.9.8.7
++    User tester
++
+ Host *
+     Compression yes

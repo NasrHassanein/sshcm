@@ -1,0 +1,21 @@
+---
+source: tests/roundtrip.rs
+expression: "outline(&Document::parse(&text))"
+---
+Global 0..0
+Host 0..5
+  [Lf] "Host" sep=" " value="github.com"
+  [Lf] "HostName" sep=" " value="github.com"
+  [Lf] "User" sep=" " value="git"
+  [Lf] "IdentityFile" sep=" " value="~/.ssh/id_ed25519"
+  [Lf] blank
+Host 5..10
+  [Lf] "Host" sep=" " value="bastion"
+  [Lf] "HostName" sep=" " value="203.0.113.10"
+  [Lf] "User" sep=" " value="ops"
+  [Lf] "Port" sep=" " value="2222"
+  [Lf] blank
+Host 10..13
+  [Lf] "Host" sep=" " value="*"
+  [Lf] "ServerAliveInterval" sep=" " value="60"
+  [Lf] "AddKeysToAgent" sep=" " value="yes"

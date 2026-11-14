@@ -1,0 +1,5 @@
+---
+source: tests/roundtrip.rs
+expression: "outline(&Document::parse(&text))"
+---
+Global 0..0

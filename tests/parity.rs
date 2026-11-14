@@ -1,0 +1,154 @@
+//! Resolution parity with OpenSSH: for each fixture and host, `resolve()` must
+//! agree with `ssh -G` on every option the file sets explicitly whose value
+//! OpenSSH prints verbatim. Skipped (with a note) if `ssh` is not installed.
+
+use std::path::Path;
+use std::process::{Command, Stdio};
+
+use sshcm::include::{ConfigSet, IncludeContext};
+use sshcm::resolve::{ResolveContext, resolve};
+use sshcm::syntax::Document;
+
+/// (fixture, hosts to probe). Fixtures with `Include` or `Match exec` are
+/// excluded: ssh would read the real filesystem or run commands.
+const CASES: &[(&str, &[&str])] = &[
+    ("basic", &["github.com", "bastion", "unknown-host"]),
+    ("separators", &["a", "b", "c", "d"]),
+    ("crlf", &["win", "other"]),
+    ("no_trailing_newline", &["last", "nope"]),
+    ("mixed_eol", &["mixed", "x"]),
+];
+
+/// Options compared: printed verbatim by `ssh -G` (no yes→true rewriting).
+const COMPARED: &[&str] = &["hostname", "user", "port"];
+
+fn ssh_g(file: &Path, host: &str) -> Option<Vec<(String, String)>> {
+    let out = Command::new("ssh")
+        .args(["-G", "-F"])
+        .arg(file)
+        .args(["--", host])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    assert!(
+        out.status.success(),
+        "ssh -G failed for {host} in {}",
+        file.display()
+    );
+    Some(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .filter_map(|l| l.split_once(' '))
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect(),
+    )
+}
+
+#[test]
+fn resolve_matches_ssh_g() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let ctx = ResolveContext {
+        local_user: std::env::var("USER").unwrap_or_default(),
+    };
+    let mut compared = 0;
+
+    for (fixture, hosts) in CASES {
+        let path = dir.join(format!("{fixture}.config"));
+        let doc = Document::parse(&std::fs::read_to_string(&path).unwrap());
+        let set = ConfigSet::single(&path, doc);
+
+        for host in *hosts {
+            let Some(ssh) = ssh_g(&path, host) else {
+                eprintln!("note: `ssh` not available; skipping parity test");
+                return;
+            };
+            let ours = resolve(&set, host, &ctx);
+            for key in COMPARED {
+                let Some(setting) = ours.get(key) else {
+                    continue;
+                };
+                let value = setting.args.join(" ");
+                if value.contains('%') {
+                    continue; // ssh expands tokens; we report them raw
+                }
+                let theirs = ssh.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+                assert_eq!(
+                    Some(value.as_str()),
+                    theirs,
+                    "{fixture}: `{key}` for host `{host}` (ours from line {})",
+                    setting.line
+                );
+                compared += 1;
+            }
+        }
+    }
+    assert!(
+        compared > 10,
+        "parity test compared too little ({compared})"
+    );
+}
+
+/// Multi-file parity: includes at top level, inside a `Host` block
+/// (conditional), globals inside an included file, and a `Host` block in a
+/// file included from an inactive block. Paths are absolute because ssh
+/// resolves relative ones against the real `~/.ssh`.
+#[test]
+fn include_resolution_matches_ssh_g() {
+    use std::fs;
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    fs::create_dir_all(d.join("conf.d")).unwrap();
+    let root = d.join("config");
+    fs::write(
+        &root,
+        format!(
+            "Include {d}/conf.d/*.conf\n\nHost bastion\n    HostName 203.0.113.10\n    Include {d}/bastion-extra\n    User jump\n\nHost *\n    User fallback\n    Port 22\n",
+            d = d.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        d.join("conf.d/10-work.conf"),
+        "Host work\n    HostName work.example\n    User alice\n",
+    )
+    .unwrap();
+    fs::write(
+        d.join("conf.d/20-home.conf"),
+        "User homeglobal\nHost nas\n    HostName 192.168.1.10\n    Port 2200\n",
+    )
+    .unwrap();
+    fs::write(
+        d.join("bastion-extra"),
+        "Port 2222\nHost work\n    HostName never-applies\n",
+    )
+    .unwrap();
+
+    let ctx = IncludeContext::for_home(d.to_owned(), "me".into());
+    let set = ConfigSet::load(&root, &ctx).unwrap();
+    assert_eq!(set.files().len(), 4);
+    assert_eq!(set.diagnostics(), &[]);
+    let rctx = ResolveContext {
+        local_user: std::env::var("USER").unwrap_or_default(),
+    };
+
+    let mut compared = 0;
+    for host in ["work", "nas", "bastion", "other"] {
+        let Some(ssh) = ssh_g(&root, host) else {
+            eprintln!("note: `ssh` not available; skipping parity test");
+            return;
+        };
+        let ours = resolve(&set, host, &rctx);
+        for key in COMPARED {
+            let theirs = ssh.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+            let mine = ours.get(key).map(|s| s.args.join(" "));
+            // ssh fills defaults (e.g. hostname = host); compare where we set it.
+            if let Some(mine) = mine {
+                assert_eq!(Some(mine), theirs, "`{key}` for `{host}`");
+                compared += 1;
+            }
+        }
+    }
+    assert!(compared >= 10, "compared only {compared}");
+}

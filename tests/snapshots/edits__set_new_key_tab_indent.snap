@@ -1,0 +1,8 @@
+---
+source: tests/edits.rs
+expression: diff
+---
+@@ -14,2 +14,3 @@
+ Host work-legacy
+ 	HostName 10.0.0.9
++	User legacy

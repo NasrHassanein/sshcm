@@ -1,0 +1,12 @@
+---
+source: tests/edits.rs
+expression: diff
+---
+@@ -1,5 +1,5 @@
+ Host=a
+-  Port=22
+-  User = bob
++  Port=2222
++  User = carol
+   HostName	=	a.example.com
+   SetEnv=FOO=bar BAZ="qux quux"

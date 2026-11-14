@@ -1,0 +1,14 @@
+---
+source: tests/roundtrip.rs
+expression: "outline(&Document::parse(&text))"
+---
+Global 0..0
+Host 0..5
+  [Lf] "Host" sep="=" value="a"
+  [Lf] "Port" sep="=" value="22"
+  [Lf] "User" sep=" = " value="bob"
+  [Lf] "HostName" sep="\t=\t" value="a.example.com"
+  [Lf] "SetEnv" sep="=" value="FOO=bar BAZ=\"qux quux\""
+Host 5..7
+  [Lf] "host" sep="  " value="b  c"
+  [Lf] "PORT" sep=" " value="2200"

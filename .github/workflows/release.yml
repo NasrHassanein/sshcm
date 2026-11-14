@@ -1,0 +1,80 @@
+# Builds release archives for Linux and macOS (x86_64 and aarch64) when a
+# version tag (v*) is pushed, and attaches them to a GitHub release.
+# Untested until the first tag.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Package (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install rustup (ARM images may lack it)
+        uses: ./.github/actions/ensure-rustup
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Stage files
+        id: stage
+        shell: bash
+        run: |
+          name="sshcm-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          bin="target/${{ matrix.target }}/release/sshcm"
+          mkdir -p "$name/completions"
+          cp "$bin" README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$name/"
+          # Completions and the man page need a binary that runs here; the
+          # cross-compiled Intel macOS build falls back to a host build.
+          host_bin="$bin"
+          if ! "$host_bin" --version >/dev/null 2>&1; then
+            cargo build --release --locked
+            host_bin="target/release/sshcm"
+          fi
+          for shell in bash zsh fish elvish powershell; do
+            "$host_bin" completions "$shell" > "$name/completions/sshcm.$shell"
+          done
+          "$host_bin" manpage > "$name/sshcm.1"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - name: Archive
+        run: |
+          tar czf "${{ steps.stage.outputs.name }}.tar.gz" "${{ steps.stage.outputs.name }}"
+          shasum -a 256 "${{ steps.stage.outputs.name }}.tar.gz" > "${{ steps.stage.outputs.name }}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: sshcm-*.tar.gz*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: sshcm-*.tar.gz*
+          generate_release_notes: true

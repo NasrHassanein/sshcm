@@ -1,0 +1,13 @@
+---
+source: tests/edits.rs
+expression: diff
+---
+@@ -9,4 +9,8 @@
+     Port 2222
+ 
++Host db
++    HostName 10.9.8.7
++    User tester
++
+ Host *
+     ServerAliveInterval 60

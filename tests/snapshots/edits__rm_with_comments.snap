@@ -1,0 +1,9 @@
+---
+source: tests/edits.rs
+expression: diff
+---
+@@ -12,4 +12,2 @@
+ 	User alice   
+ 	# ProxyJump bastion
+-Host work-legacy
+-	HostName 10.0.0.9

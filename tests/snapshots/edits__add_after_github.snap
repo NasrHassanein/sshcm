@@ -1,0 +1,13 @@
+---
+source: tests/edits.rs
+expression: diff
+---
+@@ -4,4 +4,8 @@
+     IdentityFile ~/.ssh/id_ed25519
+ 
++Host db
++    HostName 10.9.8.7
++    User tester
++
+ Host bastion
+     HostName 203.0.113.10

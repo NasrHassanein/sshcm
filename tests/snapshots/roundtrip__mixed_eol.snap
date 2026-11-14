@@ -1,0 +1,11 @@
+---
+source: tests/roundtrip.rs
+expression: "outline(&Document::parse(&text))"
+---
+Global 0..0
+Host 0..5
+  [Lf] "Host" sep=" " value="mixed"
+  [CrLf] "User" sep=" " value="a"
+  [Lf] "Port" sep=" " value="1"
+  [Lf] blank
+  [Lf] blank

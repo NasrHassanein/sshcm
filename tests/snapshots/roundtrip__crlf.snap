@@ -1,0 +1,13 @@
+---
+source: tests/roundtrip.rs
+expression: "outline(&Document::parse(&text))"
+---
+Global 0..0
+Host 0..4
+  [CrLf] "Host" sep=" " value="win"
+  [CrLf] "HostName" sep=" " value="win.example.com"
+  [CrLf] "User" sep=" " value="admin"
+  [CrLf] blank
+Host 4..6
+  [CrLf] "Host" sep=" " value="*"
+  [CrLf] "Compression" sep=" " value="yes"

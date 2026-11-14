@@ -1,0 +1,22 @@
+---
+source: tests/roundtrip.rs
+expression: "outline(&Document::parse(&text))"
+---
+Global 0..9
+  [Lf] comment "# ~/.ssh/config — managed by hand since 2014"
+  [Lf] comment "# Global defaults first (first match wins!)"
+  [Lf] blank
+  [Lf] "Include" sep=" " value="~/.ssh/config.d/*"
+  [Lf] "IdentitiesOnly" sep=" " value="yes"
+  [Lf] blank
+  [Lf] comment "# an indented comment"
+  [Lf] blank
+  [Lf] comment "# --- work ---"
+Host 9..13
+  [Lf] "Host" sep=" " value="work-* !work-legacy"
+  [Lf] "HostName" sep=" " value="%h.corp.example.com"
+  [Lf] "User" sep=" " value="alice"
+  [Lf] comment "# ProxyJump bastion"
+Host 13..15
+  [Lf] "Host" sep=" " value="work-legacy"
+  [Lf] "HostName" sep=" " value="10.0.0.9"

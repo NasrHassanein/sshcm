@@ -1,0 +1,7 @@
+# Normalise text files to LF in the repository and on checkout, on every OS.
+* text=auto eol=lf
+
+# Test fixtures and snapshots are byte-exact inputs/outputs: never convert
+# their line endings (crlf.config and mixed_eol.config contain CRLF on purpose).
+tests/fixtures/** -text
+tests/snapshots/** -text

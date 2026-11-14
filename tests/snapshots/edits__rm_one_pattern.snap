@@ -1,0 +1,10 @@
+---
+source: tests/edits.rs
+expression: diff
+---
+@@ -4,4 +4,4 @@
+   HostName	=	a.example.com
+   SetEnv=FOO=bar BAZ="qux quux"
+-host  b  c
++host  c
+   PORT 2200

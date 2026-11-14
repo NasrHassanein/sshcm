@@ -42,6 +42,54 @@ Updated ~/.ssh/config (backup: ~/.ssh/.sshcm/backups/config.20261114T101500.1234
 
 ## Install
 
+### Quick install
+
+Pick the command for your shell:
+
+```bash
+# bash
+curl -fsSL https://github.com/NasrHassanein/sshcm/releases/latest/download/install.sh | sh -s -- --shell bash
+```
+
+```zsh
+# zsh (the default shell on macOS)
+curl -fsSL https://github.com/NasrHassanein/sshcm/releases/latest/download/install.sh | sh -s -- --shell zsh
+```
+
+```fish
+# fish
+curl -fsSL https://github.com/NasrHassanein/sshcm/releases/latest/download/install.sh | sh -s -- --shell fish
+```
+
+The installer downloads the latest release for your OS and CPU, verifies its
+SHA-256 checksum, and installs `sshcm` into `~/.local/bin` along with its man
+page. It then sets up your shell:
+
+| Shell | Completion installed to | `~/.local/bin` added to `PATH` in |
+|---|---|---|
+| bash | `~/.local/share/bash-completion/completions/sshcm` (needs the `bash-completion` package) | `~/.bashrc` |
+| zsh | `~/.local/share/zsh/site-functions/_sshcm` | `~/.zshrc` (which also loads the completion) |
+| fish | `~/.config/fish/completions/sshcm.fish` | `~/.config/fish/conf.d/sshcm.fish` |
+
+If the startup file already puts `~/.local/bin` on `PATH` (Fedora's default
+`~/.bashrc` does, for example), it is left alone. Anything the installer adds
+sits between `# >>> sshcm installer >>>` and `# <<< sshcm installer <<<`
+lines, so running it again (to upgrade) replaces that block rather than
+adding another. Without `--shell`, the installer sets up the shell named in
+`$SHELL`.
+
+Options (after `sh -s --`):
+
+| Option | Effect |
+|---|---|
+| `--version v0.4.0` | Install that release instead of the latest |
+| `--no-modify-path` | Don't edit startup files; print the lines to add instead |
+| `--uninstall` | Remove the binary, completion, man page, and the marked block (your `~/.ssh/config` and its backups are untouched) |
+
+`SSHCM_BIN_DIR` installs somewhere other than `~/.local/bin`. Every release
+archive also contains `install.sh`; run `./install.sh --shell zsh` (etc.)
+from the extracted directory to install those files without network access.
+
 ### Download a binary
 
 Every [release](https://github.com/NasrHassanein/sshcm/releases) has archives for:

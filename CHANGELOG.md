@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0 — unreleased
+
+One-line install.
+
+- New `install.sh`: `curl -fsSL https://github.com/NasrHassanein/sshcm/releases/latest/download/install.sh | sh -s -- --shell zsh`
+  (or `bash`, `fish`) downloads the latest release for the OS and CPU,
+  verifies its checksum, installs `sshcm` into `~/.local/bin` with its man
+  page, and installs shell completion.
+- Adds `~/.local/bin` to `PATH` in `~/.bashrc` or `~/.zshrc` (or a fish
+  `conf.d` snippet) only when the file doesn't already do so. Its edits sit
+  in one marked block: re-running replaces it, `--uninstall` removes it.
+- Also shipped inside every release archive for offline installs, and
+  attached to each release on its own.
+- Fixed: `sshcm completions zsh | head` (or any reader closing the pipe
+  early) panicked instead of exiting quietly.
+
 ## 0.3.0 — 2026-11-14
 
 From ssh commands to config records.

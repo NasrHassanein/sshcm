@@ -73,6 +73,29 @@ jobs:
         continue-on-error: true
       - run: cargo test --all-features --locked
 
+  installer:
+    name: Installer (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu's /bin/sh is dash, the strictest common POSIX shell.
+          - { name: linux, os: ubuntu-latest }
+          - { name: macos, os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install zsh and fish
+        run: |
+          if command -v apt-get >/dev/null; then
+            sudo apt-get update && sudo apt-get install -y zsh fish shellcheck
+          else
+            brew install fish
+          fi
+      - run: .github/scripts/test-install.sh
+
   build:
     name: Build (${{ matrix.target }})
     needs: [check, test]

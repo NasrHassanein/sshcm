@@ -275,12 +275,15 @@ fn run(cli: &Cli) -> Result<()> {
     // Commands that don't touch a config file.
     match &cli.command {
         Command::Completions { shell } => {
-            clap_complete::generate(*shell, &mut Cli::command(), "sshcm", &mut std::io::stdout());
-            return Ok(());
+            // `generate` panics on write errors, so render into memory first.
+            let mut out = Vec::new();
+            clap_complete::generate(*shell, &mut Cli::command(), "sshcm", &mut out);
+            return write_stdout(&out);
         }
         Command::Manpage => {
-            clap_mangen::Man::new(Cli::command()).render(&mut std::io::stdout())?;
-            return Ok(());
+            let mut out = Vec::new();
+            clap_mangen::Man::new(Cli::command()).render(&mut out)?;
+            return write_stdout(&out);
         }
         _ => {}
     }
@@ -291,7 +294,7 @@ fn run(cli: &Cli) -> Result<()> {
         Command::List { .. }
         | Command::Show { .. }
         | Command::Resolve { .. }
-        | Command::DumpSyntax => print!("{}", read_command(cli, &path)?),
+        | Command::DumpSyntax => write_stdout(read_command(cli, &path)?.as_bytes())?,
         Command::Lint {
             strict,
             json,
@@ -440,6 +443,17 @@ fn exit_code(e: &anyhow::Error) -> u8 {
 }
 
 /// Parse arguments, run, and map errors to exit codes.
+/// Write `bytes` to stdout. A reader that closed the pipe early (`| head`)
+/// is not an error: the output simply ends there, as with C tools.
+fn write_stdout(bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    match out.write_all(bytes).and_then(|()| out.flush()) {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(&cli) {

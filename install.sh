@@ -99,6 +99,7 @@ ZSHRC="${ZDOTDIR:-$HOME}/.zshrc"
 
 # Spell a path the way a startup file should: "$HOME/..." rather than the
 # expanded home directory, so the file keeps working if it is shared.
+# shellcheck disable=SC2016 # a literal $HOME is the point
 portable() {
     case "$1" in
         "$HOME"/*) printf '$HOME/%s' "${1#"$HOME"/}" ;;
@@ -375,6 +376,7 @@ case "$shell_name" in
         # Works whether this lands before or after the user's own compinit.
         zsh_block="$(
             [ -z "$path_line" ] || printf '%s\n' "$path_line"
+            # shellcheck disable=SC2016 # $fpath is for zsh to expand
             printf 'fpath=("%s" $fpath)\n' "$(portable "$ZSH_FUNCTIONS")"
             printf '%s\n' 'autoload -Uz _sshcm'
             printf '%s\n' 'if (( $+functions[compdef] )); then compdef _sshcm sshcm; else autoload -Uz compinit && compinit; fi'

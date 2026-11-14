@@ -56,6 +56,11 @@ install_in() {
         "$run_sh" "$archive/install.sh" "$@"
 }
 
+# Shells are run by full path: the tests give them a minimal PATH, which
+# would not find e.g. Homebrew's /opt/homebrew/bin/fish.
+zsh_bin="$(command -v zsh || true)"
+fish_bin="$(command -v fish || true)"
+
 # --- per shell: fresh install, idempotent re-run, uninstall -----------------
 for shell in bash zsh fish; do
     echo "$shell"
@@ -80,14 +85,14 @@ for shell in bash zsh fish; do
             check "bash: rc puts sshcm on PATH" env -i HOME="$h" PATH=/usr/bin:/bin bash -c ". \"$rc\"; command -v sshcm"
             ;;
         zsh)
-            if command -v zsh >/dev/null; then
-                check "zsh: completion function resolves" env -i HOME="$h" PATH=/usr/bin:/bin zsh -i -c 'whence -w _sshcm | grep -q function && command -v sshcm'
+            if [[ -n "$zsh_bin" ]]; then
+                check "zsh: completion function resolves" env -i HOME="$h" PATH=/usr/bin:/bin "$zsh_bin" -i -c 'whence -w _sshcm | grep -q function && command -v sshcm'
             fi
             ;;
         fish)
-            if command -v fish >/dev/null; then
-                check "fish: conf.d puts sshcm on PATH" env -i HOME="$h" PATH=/usr/bin:/bin fish -c 'command -v sshcm'
-                check "fish: completes subcommands" sh -c "env -i HOME='$h' PATH=/usr/bin:/bin fish -c 'complete -C\"sshcm li\"' | grep -q '^list'"
+            if [[ -n "$fish_bin" ]]; then
+                check "fish: conf.d puts sshcm on PATH" env -i HOME="$h" PATH=/usr/bin:/bin "$fish_bin" -c 'command -v sshcm'
+                check "fish: completes subcommands" sh -c "env -i HOME='$h' PATH=/usr/bin:/bin '$fish_bin' -c 'complete -C\"sshcm li\"' | grep -q '^list'"
             fi
             ;;
     esac

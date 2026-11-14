@@ -17,6 +17,7 @@
 //! | W003 | warning  | `IdentityFile` missing or readable by others |
 //! | W005 | warning  | `Include` inside a `Host`/`Match` block (conditional) |
 //! | W006 | warning  | macOS-only keyword without `IgnoreUnknown` |
+//! | W007 | warning  | two forwards for a host listen on the same endpoint |
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
@@ -26,6 +27,7 @@ use serde::Serialize;
 
 use crate::hosts::block_patterns;
 use crate::include::ConfigSet;
+use crate::model::forward::{Endpoint, Forward, ForwardKind};
 use crate::model::keyword::{self, Merge};
 use crate::model::pattern::wildcard_match;
 use crate::model::value::split_args;
@@ -92,6 +94,7 @@ pub fn lint(set: &ConfigSet, ctx: &LintContext) -> Vec<Finding> {
     }
     duplicate_aliases(set, &mut out);
     shadowed_options(set, ctx, &mut out);
+    forward_conflicts(set, ctx, &mut out);
 
     let order: HashMap<&Path, usize> = set
         .files()
@@ -201,6 +204,11 @@ fn line_checks(
             }
             if let Some(msg) = check_value(canon, &args) {
                 out.push(finding("E002", path, n, msg));
+            }
+            if let Some(kind) = ForwardKind::from_keyword(canon)
+                && let Err(e) = Forward::from_config(kind, &args)
+            {
+                out.push(finding("E002", path, n, format!("`{canon}`: {e}")));
             }
             if canon == "Include" && block.kind() != BlockKind::Global {
                 out.push(finding("W005", path, n, "`Include` inside a Host/Match block only takes effect when that block applies; move it above the first Host line if it is meant to be global".into()));
@@ -431,6 +439,64 @@ fn shadowed_options(set: &ConfigSet, ctx: &LintContext, out: &mut Vec<Finding>) 
     }
 }
 
+/// Two forwards that apply to the same host and listen on the same
+/// endpoint: the second fails with "Address already in use" (or aborts the
+/// connection under `ExitOnForwardFailure`). Local and dynamic forwards
+/// share the local side; remote forwards the remote side. Endpoints are
+/// compared as written (`8080` and `localhost:8080` are not unified), so
+/// there are no false positives; remote port 0 (server-assigned) never
+/// conflicts.
+fn forward_conflicts(set: &ConfigSet, ctx: &LintContext, out: &mut Vec<Finding>) {
+    let rctx = ResolveContext {
+        local_user: ctx.local_user.clone(),
+    };
+    let mut reported = std::collections::HashSet::new();
+    for (fid, bi) in set.blocks_in_read_order() {
+        let file = &set.files()[fid];
+        let Some(patterns) = block_patterns(&file.doc, &file.doc.blocks()[bi]) else {
+            continue;
+        };
+        for alias in patterns
+            .patterns()
+            .iter()
+            .filter(|p| p.is_literal())
+            .map(|p| p.glob.clone())
+        {
+            let res = resolve(set, &alias, &rctx);
+            let mut seen: HashMap<(bool, Endpoint), (PathBuf, usize)> = HashMap::new();
+            for s in &res.settings {
+                let Some(kind) = ForwardKind::from_keyword(&s.keyword) else {
+                    continue;
+                };
+                let Ok(f) = Forward::from_config(kind, &s.args) else {
+                    continue;
+                };
+                let remote_side = kind == ForwardKind::Remote;
+                if remote_side && matches!(&f.listen, Endpoint::Tcp { port, .. } if port == "0") {
+                    continue;
+                }
+                match seen.get(&(remote_side, f.listen.clone())) {
+                    Some((pf, pl)) if reported.insert((s.file.clone(), s.line)) => out.push(finding(
+                        "W007",
+                        &s.file,
+                        s.line,
+                        format!(
+                            "for `{alias}`, this forward listens on the same {} endpoint `{}` as {}:{pl}; ssh fails with \"Address already in use\"",
+                            if remote_side { "remote" } else { "local" },
+                            f.listen,
+                            pf.display()
+                        ),
+                    )),
+                    Some(_) => {}
+                    None => {
+                        seen.insert((remote_side, f.listen.clone()), (s.file.clone(), s.line));
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Filesystem checks
 // ---------------------------------------------------------------------------
@@ -537,6 +603,19 @@ mod tests {
     #[test]
     fn invalid_lines_and_quotes() {
         assert_eq!(codes("=x\nUser \"open\n"), [("E003", 1), ("E003", 2)]);
+    }
+
+    #[test]
+    fn forward_specs_and_conflicts() {
+        assert_eq!(
+            codes(
+                "Host a\n  LocalForward 8080:db:80\n  DynamicForward 0\n  RemoteForward 9000 db\n"
+            ),
+            [("E002", 2), ("E002", 3), ("E002", 4)]
+        );
+        // Local + dynamic share the local side; Host * forwards count too.
+        let cfg = "Host a\n  LocalForward 1080 db:80\n  RemoteForward 1080 x:1\nHost *\n  DynamicForward 1080\n  RemoteForward 0 y:1\n  RemoteForward 0 z:1\n";
+        assert_eq!(codes(cfg), [("W007", 5)]);
     }
 
     #[test]

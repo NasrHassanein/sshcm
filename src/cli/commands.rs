@@ -8,8 +8,9 @@ use std::process::{Command as Process, Stdio};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use sshcm::diagnostic::Diagnostic;
-use sshcm::hosts::{find_alias_in, host_entries_in};
+use sshcm::hosts::{HostEntry, find_alias_in, host_entries_in};
 use sshcm::include::ConfigSet;
+use sshcm::model::forward::Forward;
 use sshcm::model::pattern::wildcard_match;
 use sshcm::model::value::quote;
 use sshcm::resolve::{ResolveContext, resolve as resolve_host};
@@ -52,6 +53,7 @@ pub fn list(set: &ConfigSet, pattern: Option<&str>, json: bool) -> Result<String
         .map(|located| {
             let e = located.entry;
             let or_none = |v: Option<String>| v.unwrap_or_else(|| NONE.to_owned());
+            let forwards = forwards_cell(&e);
             let identity = match e.identity_files.as_slice() {
                 [] => NONE.to_owned(),
                 [one] => one.clone(),
@@ -68,14 +70,105 @@ pub fn list(set: &ConfigSet, pattern: Option<&str>, json: bool) -> Result<String
                 or_none(e.user),
                 or_none(e.port),
                 identity,
+                forwards,
                 source,
             ]
         })
         .collect();
     let last = if multi_file { "SOURCE" } else { "LINE" };
     Ok(table::render(
-        &["HOST", "HOSTNAME", "USER", "PORT", "IDENTITY", last],
+        &[
+            "HOST", "HOSTNAME", "USER", "PORT", "IDENTITY", "FORWARDS", last,
+        ],
         &rows,
+    ))
+}
+
+/// At most two forwards in short form, `+N` for the rest, then `A`/`X` for
+/// agent and X11 forwarding; `-` when there is nothing.
+fn forwards_cell(e: &HostEntry) -> String {
+    const SHOWN: usize = 2;
+    let mut parts: Vec<String> = e.forwards.iter().take(SHOWN).map(Forward::short).collect();
+    if e.forwards.len() > SHOWN {
+        parts.push(format!("+{}", e.forwards.len() - SHOWN));
+    }
+    if e.forward_agent {
+        parts.push("A".to_owned());
+    }
+    if e.forward_x11 {
+        parts.push("X".to_owned());
+    }
+    if parts.is_empty() {
+        NONE.to_owned()
+    } else {
+        parts.join(" ")
+    }
+}
+
+#[derive(Serialize)]
+struct ForwardRow<'a> {
+    host: &'a [String],
+    file: String,
+    line: usize,
+    #[serde(rename = "type")]
+    type_name: &'static str,
+    config: String,
+    #[serde(flatten)]
+    forward: &'a Forward,
+}
+
+/// `forward list [ALIAS]`: one row per forward, in ssh's reading order.
+pub fn forward_list(set: &ConfigSet, alias: Option<&str>, json: bool) -> Result<String> {
+    let entries: Vec<_> = host_entries_in(set)
+        .into_iter()
+        .filter(|e| alias.is_none_or(|a| e.entry.patterns.iter().any(|p| p == a)))
+        .collect();
+    if let Some(a) = alias
+        && entries.is_empty()
+    {
+        return Err(NotFound(a.to_owned()).into());
+    }
+    let rows: Vec<ForwardRow<'_>> = entries
+        .iter()
+        .flat_map(|e| {
+            e.entry.forwards.iter().map(move |f| ForwardRow {
+                host: &e.entry.patterns,
+                file: display(&e.file),
+                line: e.entry.line,
+                type_name: f.type_name(),
+                config: f.to_string(),
+                forward: f,
+            })
+        })
+        .collect();
+
+    if json {
+        return Ok(serde_json::to_string_pretty(&rows)? + "\n");
+    }
+    if rows.is_empty() {
+        eprintln!("No forwards.");
+        return Ok(String::new());
+    }
+    let table: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| {
+            let target = match (&r.forward.target, r.forward.is_reverse_dynamic()) {
+                (Some(t), _) => t.to_string(),
+                (None, true) => "(SOCKS proxy on remote)".to_owned(),
+                (None, false) => "(SOCKS proxy)".to_owned(),
+            };
+            vec![
+                r.host.join(" "),
+                r.type_name.to_owned(),
+                r.forward.listen.to_string(),
+                target,
+                format!("{}:{}", r.file, r.line),
+            ]
+        })
+        .collect();
+    Ok(table::render(
+        &["HOST", "TYPE", "LISTEN", "TARGET", "SOURCE"],
+        &table,
     ))
 }
 

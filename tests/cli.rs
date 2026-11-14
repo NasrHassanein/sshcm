@@ -718,3 +718,179 @@ fn refuses_to_edit_a_file_ssh_rejects() {
         "{\n  \"hosts\": []\n}\n"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Forwarding
+// ---------------------------------------------------------------------------
+
+mod forwarding {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn sandbox_from(name: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        fs::copy(fixture(name), &config).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        let p = config.to_str().unwrap().to_owned();
+        (dir, p)
+    }
+
+    #[test]
+    fn list_shows_forwards_column_with_truncation_and_flags() {
+        sshcm(&fixture("forwards"))
+            .arg("list")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("FORWARDS"))
+            .stdout(predicate::str::contains(
+                "L5432→localhost:5432 L127.0.0.1:6379→cache.internal:6379 ",
+            ))
+            .stdout(predicate::str::contains("D1080 D[::1]:1081 +3 A"))
+            .stdout(predicate::str::contains(
+                "L2375→/var/run/docker.sock L/tmp/pg.sock→db.internal:5432 +1 X",
+            ));
+    }
+
+    #[test]
+    fn list_json_has_structured_forwards() {
+        let out = sshcm(&fixture("forwards"))
+            .args(["list", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let jump = &v[1];
+        assert_eq!(jump["patterns"][0], "jump");
+        assert_eq!(jump["forward_agent"], true);
+        assert_eq!(jump["forwards"].as_array().unwrap().len(), 5);
+        assert_eq!(jump["forwards"][4]["kind"], "remote");
+        assert_eq!(jump["forwards"][4]["target"], serde_json::Value::Null);
+        assert_eq!(jump["forwards"][4]["listen"]["host"], "*");
+    }
+
+    #[test]
+    fn forward_list_shows_every_forward_with_types() {
+        sshcm(&fixture("forwards"))
+            .args(["forward", "list", "jump"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("reverse-dynamic  *:1090"))
+            .stdout(predicate::str::contains("(SOCKS proxy on remote)"))
+            .stdout(predicate::str::contains(
+                "remote           0           localhost:3001",
+            ));
+        sshcm(&fixture("forwards"))
+            .args(["forward", "list", "nope"])
+            .assert()
+            .code(3);
+        let out = sshcm(&fixture("forwards"))
+            .args(["forward", "list", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 10);
+        assert_eq!(v[0]["config"], "LocalForward 5432 localhost:5432");
+    }
+
+    #[test]
+    fn forward_add_writes_config_syntax_and_rm_undoes_it() {
+        let (_d, cfg) = sandbox_from("basic");
+        let original = fs::read_to_string(&cfg).unwrap();
+        sshcm(&cfg)
+            .args([
+                "forward",
+                "add",
+                "bastion",
+                "-L",
+                "127.0.0.1:5432:db:5432",
+                "-D",
+                "1080",
+                "-y",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                "+    LocalForward 127.0.0.1:5432 db:5432",
+            ))
+            .stdout(predicate::str::contains("+    DynamicForward 1080"));
+        sshcm(&cfg)
+            .args(["forward", "add", "bastion", "-D", "1080", "-y"])
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains(
+                "already has a forward listening on -D 1080",
+            ));
+        sshcm(&cfg)
+            .args([
+                "forward",
+                "rm",
+                "bastion",
+                "-L",
+                "127.0.0.1:5432",
+                "-D",
+                "1080",
+                "-y",
+            ])
+            .assert()
+            .success();
+        assert_eq!(fs::read_to_string(&cfg).unwrap(), original);
+        sshcm(&cfg)
+            .args(["forward", "rm", "bastion", "-D", "1080", "-y"])
+            .assert()
+            .code(3);
+    }
+
+    #[test]
+    fn add_accepts_forward_flags_and_bad_specs_fail_early() {
+        let (_d, cfg) = sandbox_from("basic");
+        sshcm(&cfg)
+            .args([
+                "add",
+                "db",
+                "--hostname",
+                "10.0.0.5",
+                "-L",
+                "5432:localhost:5432",
+                "-R",
+                "9000",
+                "-y",
+            ])
+            .assert()
+            .success();
+        assert!(fs::read_to_string(&cfg).unwrap().contains(
+            "Host db\n    HostName 10.0.0.5\n    LocalForward 5432 localhost:5432\n    RemoteForward 9000\n"
+        ));
+        sshcm(&cfg)
+            .args(["forward", "add", "db", "-L", "8080:localhost", "-y"])
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains("-L 8080:localhost"));
+        sshcm(&cfg)
+            .args(["forward", "add", "db", "-y"])
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains("at least one of -L, -R, -D"));
+    }
+
+    #[test]
+    fn lint_reports_forward_conflicts() {
+        let (_d, cfg) = sandbox_from("forwards");
+        sshcm(&cfg)
+            .args(["forward", "add", "db", "-D", "5432", "-y"])
+            .assert()
+            .success();
+        sshcm(&cfg)
+            .args(["lint", "--no-file-checks"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("warning[W007]"))
+            .stdout(predicate::str::contains("same local endpoint `5432`"));
+    }
+}

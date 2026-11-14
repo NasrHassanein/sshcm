@@ -20,7 +20,8 @@
 
 use std::ops::Range;
 
-use crate::hosts::{block_patterns, find_alias};
+use crate::hosts::{block_patterns, find_alias, forward_of};
+use crate::model::forward::{Endpoint, Forward, ForwardKind};
 use crate::model::keyword::{self, Merge};
 use crate::model::value::{quote, split_args};
 use crate::syntax::{BlockKind, Document, Eol, Line};
@@ -82,6 +83,24 @@ pub enum EditError {
     /// The `Host` line could not be parsed (e.g. unterminated quote).
     #[error("cannot parse the Host line at line {0}")]
     UnparsableHost(usize),
+    /// `forward add` for a listen endpoint the block already forwards.
+    #[error("`{alias}` already has a forward listening on {listen} ({existing})")]
+    ForwardExists {
+        /// The alias.
+        alias: String,
+        /// The listen endpoint, e.g. `-L 8080`.
+        listen: String,
+        /// The existing forward, e.g. `L8080→db:80`.
+        existing: String,
+    },
+    /// `forward rm` found no matching forward.
+    #[error("`{alias}` has no forward listening on {listen}")]
+    ForwardNotFound {
+        /// The alias.
+        alias: String,
+        /// The listen endpoint, e.g. `-L 8080`.
+        listen: String,
+    },
 }
 
 /// Where `add` puts a new block.
@@ -295,6 +314,72 @@ pub fn unset(doc: &mut Document, alias: &str, key: &str) -> Result<(), EditError
         }
     });
     Ok(())
+}
+
+/// Add a forward to the block for `alias`, after its last option.
+///
+/// # Errors
+/// If the alias is missing, or the block already forwards the same kind on
+/// the same listen endpoint (ssh would fail with "Address already in use").
+pub fn add_forward(doc: &mut Document, alias: &str, forward: &Forward) -> Result<(), EditError> {
+    let bi = first_block(doc, alias)?;
+    if let Some(existing) = block_forwards(doc, bi)
+        .into_iter()
+        .map(|(_, f)| f)
+        .find(|f| f.listens_on(forward.kind, &forward.listen))
+    {
+        return Err(EditError::ForwardExists {
+            alias: alias.to_owned(),
+            listen: format!("-{} {}", forward.kind.flag(), forward.listen),
+            existing: existing.short(),
+        });
+    }
+    set(
+        doc,
+        alias,
+        forward.keyword(),
+        &forward.to_config_value(),
+        true,
+    )
+}
+
+/// Remove the forward(s) of `kind` listening on `listen` from the block for
+/// `alias`, leaving the block's other forwards alone.
+///
+/// # Errors
+/// If the alias is missing or no such forward exists.
+pub fn remove_forward(
+    doc: &mut Document,
+    alias: &str,
+    kind: ForwardKind,
+    listen: &Endpoint,
+) -> Result<(), EditError> {
+    let bi = first_block(doc, alias)?;
+    let hits: Vec<usize> = block_forwards(doc, bi)
+        .into_iter()
+        .filter(|(_, f)| f.listens_on(kind, listen))
+        .map(|(i, _)| i)
+        .collect();
+    if hits.is_empty() {
+        return Err(EditError::ForwardNotFound {
+            alias: alias.to_owned(),
+            listen: format!("-{} {listen}", kind.flag()),
+        });
+    }
+    preserving_final_newline(doc, |doc| {
+        for &i in hits.iter().rev() {
+            doc.splice(i..i + 1, []);
+        }
+    });
+    Ok(())
+}
+
+/// `(line index, forward)` for every parsable forward in block `bi`.
+fn block_forwards(doc: &Document, bi: usize) -> Vec<(usize, Forward)> {
+    let header = doc.blocks()[bi].lines().start;
+    (header + 1..block_extent(doc, bi).end)
+        .filter_map(|i| Some((i, forward_of(&doc.lines()[i])?.ok()?)))
+        .collect()
 }
 
 /// Remove `alias` from every `Host` line naming it. A block whose `Host` line
@@ -811,6 +896,58 @@ mod tests {
             edited("Host a\n  User x\n\nHost *\n", |d| copy(d, "a", "c")),
             "Host a\n  User x\n\nHost c\n  User x\n\nHost *\n"
         );
+    }
+
+    #[test]
+    fn forwards_add_and_remove_precisely() {
+        use crate::model::forward::parse_listen;
+        let input = "Host db\n\tHostName 10.0.0.5\n\tLocalForward 9000 a:1\n\nHost *\n";
+        let fwd = |k, s| Forward::from_cli(k, s).unwrap();
+        let out = edited(input, |d| {
+            add_forward(d, "db", &fwd(ForwardKind::Local, "5432:localhost:5432"))?;
+            add_forward(d, "db", &fwd(ForwardKind::Dynamic, "1080"))
+        });
+        assert_eq!(
+            out,
+            "Host db\n\tHostName 10.0.0.5\n\tLocalForward 9000 a:1\n\tLocalForward 5432 localhost:5432\n\tDynamicForward 1080\n\nHost *\n"
+        );
+
+        // Removing one forward leaves the others, and add+rm is the identity.
+        let mut d = Document::parse(&out);
+        remove_forward(
+            &mut d,
+            "db",
+            ForwardKind::Local,
+            &parse_listen(ForwardKind::Local, "5432").unwrap(),
+        )
+        .unwrap();
+        remove_forward(
+            &mut d,
+            "db",
+            ForwardKind::Dynamic,
+            &parse_listen(ForwardKind::Dynamic, "1080").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(d.render(), input);
+
+        let mut d = Document::parse(input);
+        assert!(matches!(
+            add_forward(&mut d, "db", &fwd(ForwardKind::Local, "9000:b:2")),
+            Err(EditError::ForwardExists { .. })
+        ));
+        assert!(
+            matches!(
+                remove_forward(
+                    &mut d,
+                    "db",
+                    ForwardKind::Remote,
+                    &parse_listen(ForwardKind::Remote, "9000").unwrap()
+                ),
+                Err(EditError::ForwardNotFound { .. })
+            ),
+            "kind must match too"
+        );
+        assert_eq!(d.render(), input);
     }
 
     #[test]

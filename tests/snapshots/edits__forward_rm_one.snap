@@ -1,0 +1,15 @@
+---
+source: tests/edits.rs
+expression: diff
+---
+@@ -12,10 +12,8 @@
+     RemoteForward 9000 localhost:3000
+     RemoteForward 0 localhost:3001
+-    RemoteForward *:1090
+     ForwardAgent yes
+ 
+ Host docker
+     HostName docker.example
+-    LocalForward 2375 /var/run/docker.sock
+     LocalForward /tmp/pg.sock db.internal:5432
+     RemoteForward /tmp/remote.sock /tmp/local.sock

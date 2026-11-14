@@ -70,10 +70,10 @@ edits are written unvalidated, with a warning).
 
 | Command | What it does |
 |---|---|
-| `sshcm list [-p GLOB] [--json]` | Table of Host blocks (across included files) |
+| `sshcm list [-p GLOB] [--json]` | Table of Host blocks (across included files), including a FORWARDS column |
 | `sshcm show ALIAS` | The block exactly as written, with file and line |
 | `sshcm resolve HOST [--json \| --via-ssh]` | Effective settings for a host, with the line each came from |
-| `sshcm add ALIAS [--hostname H] [-u USER] [-p PORT] [-i KEY] [-o K=V]… [--before A \| --after A]` | New block; goes before `Host *` by default so wildcard defaults keep working |
+| `sshcm add ALIAS [--hostname H] [-u USER] [-p PORT] [-i KEY] [-L/-R/-D SPEC]… [-o K=V]… [--before A \| --after A]` | New block; goes before `Host *` by default so wildcard defaults keep working |
 | `sshcm set ALIAS K=V… [--append]` | Change options in place (`--append` adds another `IdentityFile`, `LocalForward`, …) |
 | `sshcm unset ALIAS KEY…` | Remove options |
 | `sshcm rm ALIAS` | Remove a host and its comments; other aliases on the same `Host` line stay |
@@ -81,12 +81,44 @@ edits are written unvalidated, with a warning).
 | `sshcm lint [--strict] [--json]` | Errors ssh would reject, and likely mistakes |
 | `sshcm fmt [--check] [--indent N \| --tabs] [--all]` | Opt-in normalisation; the only command that rewrites style |
 | `sshcm export` / `sshcm import FILE [--skip-existing]` | JSON interchange of Host blocks |
+| `sshcm forward list [ALIAS]` / `forward add ALIAS -L/-R/-D SPEC…` / `forward rm ALIAS -L/-R/-D LISTEN…` | Port and socket forwarding in `ssh -L/-R/-D` syntax |
 | `sshcm backup list` / `sshcm backup restore [latest \| N \| NAME]` | Manage backups (a restore is itself backed up) |
 | `sshcm completions SHELL` | Shell completion script |
 
 Every command that writes accepts `--dry-run` (show the diff only), `-y`
 (no prompt; also implied when stdin is not a terminal), `--no-backup`, and
 `--no-validate`. `-F PATH` (or `SSHCM_CONFIG`) selects another config file.
+
+### Forwarding
+
+`sshcm` understands every forwarding shape OpenSSH supports and takes them in
+the familiar `ssh -L/-R/-D` syntax, writing the config syntax for you
+(`-L 8080:db:80` becomes `LocalForward 8080 db:80`; the colon form is
+rejected inside a config file).
+
+| Type | Flag | Example | Written as |
+|---|---|---|---|
+| local | `-L` | `-L 5432:localhost:5432` | `LocalForward 5432 localhost:5432` |
+| remote | `-R` | `-R 9000:localhost:3000` | `RemoteForward 9000 localhost:3000` |
+| dynamic (SOCKS) | `-D` | `-D 1080` | `DynamicForward 1080` |
+| reverse dynamic | `-R` | `-R 1080` | `RemoteForward 1080` (SOCKS proxy on the remote side) |
+| Unix sockets | `-L`/`-R` | `-L 2375:/var/run/docker.sock` | `LocalForward 2375 /var/run/docker.sock` |
+
+Bind addresses (`127.0.0.1:8080:…`, `*:8080:…`) and IPv6 (`[::1]:8080:…`)
+work as in ssh. `forward rm` removes one tunnel by its listen side
+(`forward rm db -L 5432`) and leaves the block's other forwards alone.
+Several flags of mixed types are written grouped as `-L`, `-R`, `-D`.
+
+```console
+$ sshcm list
+HOST  HOSTNAME     USER  PORT  IDENTITY  FORWARDS                               LINE
+db    10.0.0.5     -     -     -         L5432→localhost:5432 D1080             3
+jump  203.0.113.1  ops   -     -         D1080 R9000→localhost:3000 +2 A        8
+```
+
+The FORWARDS column shows up to two forwards and `+N` for the rest
+(`sshcm forward list` shows all), plus `A` when agent forwarding and `X`
+when X11 forwarding is enabled for that block.
 
 ### Include
 
@@ -104,7 +136,7 @@ Every error is something `ssh` itself rejects.
 | Code | | Meaning |
 |---|---|---|
 | E001 | error | Unknown keyword (honours `IgnoreUnknown`), with a "did you mean" hint |
-| E002 | error | Missing, extra, or invalid value (`Port 0`, `Compression true`, `ConnectTimeout 5x`) |
+| E002 | error | Missing, extra, or invalid value (`Port 0`, `Compression true`, `LocalForward 8080:db:80`) |
 | E003 | error | Line without a keyword, or an unterminated quote |
 | E004 | error | Config writable by group/others (ssh refuses it) |
 | E005 | error | `Include` problem: cycle, nesting > 16, unreadable or writable file |
@@ -113,6 +145,7 @@ Every error is something `ssh` itself rejects.
 | W003 | warning | `IdentityFile` missing, or readable by others (ssh ignores such keys) |
 | W005 | warning | `Include` inside a `Host`/`Match` block |
 | W006 | warning | macOS-only `UseKeychain` without `IgnoreUnknown` |
+| W007 | warning | Two forwards for the same host listen on the same endpoint (ssh: "Address already in use") |
 
 ### Exit codes
 

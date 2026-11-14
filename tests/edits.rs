@@ -152,3 +152,75 @@ fn golden_copy() {
         edit::copy(d, "bastion", "bastion2")
     });
 }
+
+// ---------------------------------------------------------------------------
+// Forwarding
+// ---------------------------------------------------------------------------
+
+use sshcm::model::forward::{Forward, ForwardKind, parse_listen};
+
+fn fwd(kind: ForwardKind, spec: &str) -> Forward {
+    Forward::from_cli(kind, spec).unwrap()
+}
+
+#[test]
+fn forward_add_then_rm_is_identity_on_every_fixture() {
+    for (name, original) in fixtures() {
+        let doc = Document::parse(&original);
+        for e in host_entries(&doc) {
+            let Some(alias) = e.patterns.iter().find(|p| !p.contains(['*', '?', '!'])) else {
+                continue;
+            };
+            let mut d = doc.clone();
+            edit::add_forward(&mut d, alias, &fwd(ForwardKind::Local, "59999:localhost:1"))
+                .unwrap();
+            edit::add_forward(&mut d, alias, &fwd(ForwardKind::Dynamic, "59998")).unwrap();
+            edit::remove_forward(
+                &mut d,
+                alias,
+                ForwardKind::Local,
+                &parse_listen(ForwardKind::Local, "59999").unwrap(),
+            )
+            .unwrap();
+            edit::remove_forward(
+                &mut d,
+                alias,
+                ForwardKind::Dynamic,
+                &parse_listen(ForwardKind::Dynamic, "59998").unwrap(),
+            )
+            .unwrap();
+            assert_eq!(d.render(), original, "{name}: forward add/rm on `{alias}`");
+        }
+    }
+}
+
+#[test]
+fn golden_forward_add_uses_block_style() {
+    snapshot_edit("forward_add_tab_indent", "comments_and_globals", |d| {
+        edit::add_forward(
+            d,
+            "work-legacy",
+            &fwd(ForwardKind::Local, "8080:localhost:80"),
+        )?;
+        edit::add_forward(d, "work-legacy", &fwd(ForwardKind::Remote, "9000"))?;
+        edit::add_forward(d, "work-legacy", &fwd(ForwardKind::Dynamic, "[::1]:1080"))
+    });
+}
+
+#[test]
+fn golden_forward_rm_removes_only_the_named_tunnel() {
+    snapshot_edit("forward_rm_one", "forwards", |d| {
+        edit::remove_forward(
+            d,
+            "docker",
+            ForwardKind::Local,
+            &parse_listen(ForwardKind::Local, "2375").unwrap(),
+        )?;
+        edit::remove_forward(
+            d,
+            "jump",
+            ForwardKind::Remote,
+            &parse_listen(ForwardKind::Remote, "*:1090").unwrap(),
+        )
+    });
+}

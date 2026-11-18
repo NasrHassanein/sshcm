@@ -14,6 +14,15 @@ use std::path::{Path, PathBuf};
 
 pub use atomic::write_atomic;
 
+/// True if `path` can be written by its group or by others (mode `0o022`).
+/// ssh refuses such config files with "Bad owner or permissions". A file
+/// whose metadata can't be read counts as not writable, because there is
+/// nothing to report about it.
+pub fn writable_by_others(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o022 != 0)
+}
+
 /// Where sshcm keeps state for `config` (a resolved, real path).
 pub fn state_dir(config: &Path) -> PathBuf {
     config

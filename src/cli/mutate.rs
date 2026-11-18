@@ -6,7 +6,6 @@
 use std::fmt::Write as _;
 use std::io::{BufRead, IsTerminal, Write as _};
 use std::path::Path;
-use std::process::{Command as Process, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -16,6 +15,7 @@ use sshcm::io::{self, backup, lock};
 use sshcm::syntax::Document;
 
 use super::args::WriteOpts;
+use super::ssh;
 
 /// How long to wait for another sshcm process to finish.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -88,17 +88,16 @@ pub fn transaction(
     Ok(())
 }
 
-/// Run `ssh -G` on the candidate. A rejection is only fatal if the original
-/// file was accepted: we must not block every edit of an already-broken file.
-/// Run `ssh -G` on the candidate. If ssh rejects it, check the original
-/// too, purely to give a better message: editing a file ssh already rejects
-/// (or that is not an ssh config at all) is refused either way, and
-/// `--no-validate` is the explicit override.
+/// Check the candidate file with `ssh -G`. If ssh rejects it, the original
+/// is checked too, only to give a better message. The edit is refused either
+/// way, even when the original was already broken (or isn't an ssh config
+/// at all); `--no-validate` is the explicit override. If ssh can't be run,
+/// we warn and write without validating.
 fn validate(candidate: &Path, original: &Path, existed: bool, host: &str) -> Result<()> {
-    match ssh_check(candidate, host) {
+    match ssh::check(candidate, host) {
         Ok(Ok(())) => Ok(()),
         Ok(Err(msg)) => {
-            if existed && matches!(ssh_check(original, host), Ok(Err(_))) {
+            if existed && matches!(ssh::check(original, host), Ok(Err(_))) {
                 Err(ValidationFailed(format!(
                     "ssh already rejects {} before this edit; run `sshcm lint` to see why\n  {msg}",
                     original.display()
@@ -114,37 +113,6 @@ fn validate(candidate: &Path, original: &Path, existed: bool, host: &str) -> Res
             );
             Ok(())
         }
-    }
-}
-
-/// `Ok(Ok(()))` if ssh accepts the file, `Ok(Err(stderr))` if it rejects it,
-/// `Err` if ssh could not be run at all.
-pub fn ssh_check(file: &Path, host: &str) -> std::io::Result<Result<(), String>> {
-    let out = Process::new("ssh")
-        .arg("-G")
-        .arg("-F")
-        .arg(file)
-        .arg("--")
-        .arg(host)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .output()?;
-    if out.status.success() {
-        Ok(Ok(()))
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        // ssh names the file it read; show the user's path, not our temp file.
-        let msg = stderr
-            .lines()
-            .filter(|l| !l.starts_with("Pseudo-terminal"))
-            .collect::<Vec<_>>()
-            .join("\n  ")
-            .replace(&file.display().to_string(), "<edited config>");
-        Ok(Err(if msg.is_empty() {
-            format!("ssh exited with {}", out.status)
-        } else {
-            msg
-        }))
     }
 }
 

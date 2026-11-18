@@ -3,9 +3,8 @@
 
 use std::fmt::Write as _;
 use std::path::Path;
-use std::process::{Command as Process, Stdio};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use serde::Serialize;
 use sshcm::diagnostic::Diagnostic;
 use sshcm::hosts::{HostEntry, find_alias_in, host_entries_in};
@@ -267,27 +266,6 @@ pub fn resolve(
             .map_or(t.clone(), |(_, rest)| rest.to_owned())
     };
     Ok((out, warnings))
-}
-
-/// Run `ssh -G` and return its stdout.
-pub fn resolve_via_ssh(path: &Path, host: &str) -> Result<String> {
-    let output = Process::new("ssh")
-        .arg("-G")
-        .arg("-F")
-        .arg(path)
-        .arg("--")
-        .arg(host)
-        .stdin(Stdio::null())
-        .output()
-        .context("running `ssh -G` (is OpenSSH installed?)")?;
-    if !output.status.success() {
-        bail!(
-            "`ssh -G` failed ({}): {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    String::from_utf8(output.stdout).context("`ssh -G` printed non-UTF-8 output")
 }
 
 pub fn dump_syntax(doc: &Document) -> String {

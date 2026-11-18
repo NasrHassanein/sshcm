@@ -767,18 +767,15 @@ fn validate_alias(alias: &str) -> Result<(), EditError> {
 
 fn settable_keyword(name: &str) -> Result<&'static str, EditError> {
     let Some(kw) = keyword::canonical(name) else {
-        let hint = keyword::suggest(name)
-            .map(|s| format!(" (did you mean `{s}`?)"))
-            .unwrap_or_default();
         return Err(EditError::UnknownKeyword {
             name: name.to_owned(),
-            hint,
+            hint: keyword::hint(name),
         });
     };
-    match kw {
-        "Host" | "Match" | "Include" => Err(EditError::ReservedKeyword(kw)),
-        _ => Ok(kw),
+    if keyword::is_structural(kw) {
+        return Err(EditError::ReservedKeyword(kw));
     }
+    Ok(kw)
 }
 
 fn validate_value(key: &str, value: &str) -> Result<(), EditError> {

@@ -5,6 +5,7 @@ mod args;
 mod commands;
 mod mutate;
 mod ops;
+mod ssh;
 mod table;
 
 use std::collections::BTreeSet;
@@ -146,12 +147,17 @@ fn add_args(cmd: &Command) -> Result<(Vec<(String, String)>, Position)> {
     for f in parse_forwards(forwards)? {
         opts.push((f.keyword().to_owned(), f.to_config_value()));
     }
-    let position = match (before, after) {
-        (Some(a), _) => Position::Before(a.clone()),
-        (_, Some(a)) => Position::After(a.clone()),
-        _ => Position::Auto,
-    };
-    Ok((opts, position))
+    Ok((opts, placement(before.as_deref(), after.as_deref())))
+}
+
+/// Where to insert a new block, from the `--before` / `--after` flags
+/// (clap makes them mutually exclusive).
+fn placement(before: Option<&str>, after: Option<&str>) -> Position {
+    match (before, after) {
+        (Some(a), _) => Position::Before(a.to_owned()),
+        (_, Some(a)) => Position::After(a.to_owned()),
+        (None, None) => Position::Auto,
+    }
 }
 
 /// Parse `-L/-R/-D` specs (ssh command-line syntax).
@@ -258,11 +264,7 @@ fn parse_command(path: &Path, w: &WriteOpts, action: &ParseAction) -> Result<()>
             if let Err(e) = ensure_absent(&set, &alias) {
                 bail!("{e:#}; use --as NAME to add it under another alias");
             }
-            let position = match (before, after) {
-                (Some(a), _) => Position::Before(a.clone()),
-                (_, Some(a)) => Position::After(a.clone()),
-                _ => Position::Auto,
-            };
+            let position = placement(before.as_deref(), after.as_deref());
             transaction(path, w, &alias, |d| {
                 edit::add_host(d, &alias, &options, &position)
             })?;
@@ -350,7 +352,7 @@ fn read_command(cli: &Cli, path: &Path) -> Result<String> {
             host,
             via_ssh: true,
             ..
-        } => commands::resolve_via_ssh(&path, host)?,
+        } => ssh::effective_config(&path, host)?,
         Command::Resolve { host, json, .. } => {
             let set = load_set(&path, false)?;
             let (out, warnings) = commands::resolve(&set, host, &local_user(), *json)?;
@@ -442,7 +444,6 @@ fn exit_code(e: &anyhow::Error) -> u8 {
     }
 }
 
-/// Parse arguments, run, and map errors to exit codes.
 /// Write `bytes` to stdout. A reader that closed the pipe early (`| head`)
 /// is not an error: the output simply ends there, as with C tools.
 fn write_stdout(bytes: &[u8]) -> Result<()> {
@@ -454,6 +455,7 @@ fn write_stdout(bytes: &[u8]) -> Result<()> {
     }
 }
 
+/// Parse arguments, run, and map errors to exit codes.
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(&cli) {

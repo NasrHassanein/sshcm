@@ -154,6 +154,21 @@ pub fn suggest(name: &str) -> Option<&'static str> {
         .map(|(_, k)| k)
 }
 
+/// A ` (did you mean `X`?)` suffix for an error about the unknown keyword
+/// `name`, or an empty string when nothing is close enough.
+pub fn hint(name: &str) -> String {
+    suggest(name)
+        .map(|s| format!(" (did you mean `{s}`?)"))
+        .unwrap_or_default()
+}
+
+/// True for `Host`, `Match`, and `Include` (given in canonical spelling):
+/// keywords that shape the file's structure rather than set an option, so
+/// they can't be set like an option and never "win" like one.
+pub fn is_structural(canonical: &str) -> bool {
+    matches!(canonical, "Host" | "Match" | "Include")
+}
+
 fn levenshtein(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let mut prev: Vec<usize> = (0..=b.len()).collect();
@@ -180,6 +195,14 @@ pub fn merge_rule(name: &str) -> Merge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hint_and_structural() {
+        assert_eq!(hint("Hostnme"), " (did you mean `HostName`?)");
+        assert_eq!(hint("Zzzzzzzzzz"), "");
+        assert!(is_structural("Include"));
+        assert!(!is_structural("HostName"));
+    }
 
     #[test]
     fn canonical_is_case_insensitive() {

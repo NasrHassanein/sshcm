@@ -394,14 +394,12 @@ fn apply_dash_o(arg: &str, opts: &mut Options) -> Result<(), CommandError> {
         arg[split + 1..].trim_start_matches(['=', ' ', '\t']).trim(),
     );
     let Some(kw) = keyword::canonical(key) else {
-        let hint = keyword::suggest(key)
-            .map(|s| format!(" (did you mean `{s}`?)"))
-            .unwrap_or_default();
+        let hint = keyword::hint(key);
         return Err(CommandError::Invalid(format!(
             "-o {arg}: unknown keyword `{key}`{hint}"
         )));
     };
-    if matches!(kw, "Host" | "Match" | "Include") {
+    if keyword::is_structural(kw) {
         return Err(CommandError::Invalid(format!(
             "-o {arg}: `{kw}` cannot be set with -o"
         )));

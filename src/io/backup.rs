@@ -7,7 +7,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// How many backups `prune` keeps per config file by default.
 pub const DEFAULT_KEEP: usize = 20;
@@ -35,11 +35,7 @@ pub fn create(config: &Path, contents: &[u8]) -> io::Result<PathBuf> {
     // Microsecond timestamps make collisions practically impossible; if one
     // happens anyway, `create_new` refuses and we retry with a fresh stamp.
     loop {
-        let stamp: String = humantime::format_rfc3339_micros(SystemTime::now())
-            .to_string()
-            .chars()
-            .filter(|c| !matches!(c, '-' | ':'))
-            .collect();
+        let stamp = utc_stamp(SystemTime::now());
         let path = dir.join(format!("{name}.{stamp}.bak"));
         let mut opts = OpenOptions::new();
         opts.write(true).create_new(true);
@@ -54,6 +50,41 @@ pub fn create(config: &Path, contents: &[u8]) -> io::Result<PathBuf> {
             Err(e) => return Err(e),
         }
     }
+}
+
+/// `time` as a compact UTC timestamp, `YYYYMMDDTHHMMSS.ffffffZ` (RFC 3339
+/// with microseconds, minus the `-` and `:` that are awkward in file
+/// names). Fixed width, so lexical order is chronological order. Times
+/// before 1970 (a badly wrong clock) are written as the epoch.
+fn utc_stamp(time: SystemTime) -> String {
+    let since_epoch = time.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = since_epoch.as_secs();
+    let (year, month, day) = civil_from_days(secs / 86_400);
+    let rem = secs % 86_400;
+    format!(
+        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}.{:06}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60,
+        since_epoch.subsec_micros()
+    )
+}
+
+/// The proleptic Gregorian `(year, month, day)` of `days` since 1970-01-01.
+/// Howard Hinnant's `civil_from_days`, specialised to non-negative input:
+/// it counts in 400-year eras of 146 097 days, with years starting on
+/// 1 March so the leap day falls at the end of the year.
+fn civil_from_days(days: u64) -> (u64, u64, u64) {
+    let z = days + 719_468; // days from 0000-03-01 to 1970-01-01
+    let era = z / 146_097;
+    let doe = z % 146_097; // day of era, 0..=146_096
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // 0..=399
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year from 1 March
+    let mp = (5 * doy + 2) / 153; // month from March, 0..=11
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = era * 400 + yoe + u64::from(month <= 2);
+    (year, month, day)
 }
 
 /// Backups of `config`, oldest first.
@@ -102,6 +133,18 @@ pub fn prune(config: &Path, keep: usize) -> io::Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utc_stamp_format() {
+        use std::time::Duration;
+        let at =
+            |secs: u64, micros: u32| utc_stamp(UNIX_EPOCH + Duration::new(secs, micros * 1000));
+        assert_eq!(at(0, 0), "19700101T000000.000000Z");
+        assert_eq!(at(951_782_400, 0), "20000229T000000.000000Z"); // leap day
+        assert_eq!(at(1_700_000_000, 42), "20231114T221320.000042Z");
+        assert_eq!(at(4_107_542_399, 999_999), "21000228T235959.999999Z"); // 2100 is not leap
+        assert_eq!(at(4_107_542_400, 0), "21000301T000000.000000Z");
+    }
 
     #[test]
     fn create_list_prune() {

@@ -9,7 +9,7 @@
 //!
 //! The parser assigns lines to blocks the way OpenSSH reads them, so a comment
 //! sitting above `Host b` technically lives in the block before it. For edits
-//! we use a presentation-oriented notion instead (see `block_extent`):
+//! we use a presentation-oriented notion instead (see `layout::block_extent`):
 //!
 //! - **intro comments**: comments directly above a header (no blank line in
 //!   between), not indented deeper than the header, describe that host;
@@ -17,14 +17,34 @@
 //!   (before any blank line) are usually commented-out options of the block;
 //! - blank lines belong to nobody; spacing is handled by `insert_block` and
 //!   `remove_range`, which are designed so that `rm` exactly undoes `add`.
+//!
+//! # Layout of this module
+//!
+//! - this file: the public operations, and finding/rewriting `Host` lines;
+//! - `validate`: checks on aliases, patterns, keywords, and values, all run
+//!   before the document is touched;
+//! - `layout`: block geometry, insertion and removal with blank-line spacing;
+//! - `style`: the indentation and separators new lines copy from the file.
 
-use std::ops::Range;
+mod layout;
+mod style;
+mod validate;
 
 use crate::hosts::{block_patterns, find_alias, forward_of};
 use crate::model::forward::{Endpoint, Forward, ForwardKind};
 use crate::model::keyword::{self, Merge};
 use crate::model::value::{quote, split_args};
-use crate::syntax::{BlockKind, Document, Eol, Line};
+use crate::syntax::{BlockKind, Document, Line};
+
+use layout::{
+    after_last_option, block_extent, header_of, insert_block, intro_start, keyword_lines,
+    option_range, preserving_final_newline, remove_lines, remove_range,
+};
+use style::Style;
+use validate::{
+    checked_options, importable_options, settable_keyword, validate_alias, validate_patterns,
+    validate_value,
+};
 
 /// Why an edit was refused. The document is unchanged when one is returned.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -158,17 +178,6 @@ pub fn render_host_block(
         .collect())
 }
 
-fn checked_options(options: &[(String, String)]) -> Result<Vec<(String, String)>, EditError> {
-    options
-        .iter()
-        .map(|(k, v)| {
-            let kw = settable_keyword(k)?;
-            validate_value(kw, v)?;
-            Ok((kw.to_owned(), v.clone()))
-        })
-        .collect()
-}
-
 /// Add a `Host` block with any pattern list (e.g. `*` or `web-* !web-old`),
 /// as used by `import`. Unknown keywords are allowed, since imported data
 /// may come from a config that uses `IgnoreUnknown`; values are still
@@ -183,45 +192,13 @@ pub fn add_block(
     options: &[(String, String)],
     position: &Position,
 ) -> Result<(), EditError> {
-    for p in patterns {
-        let bad = |reason| EditError::InvalidAlias {
-            alias: p.clone(),
-            reason,
-        };
-        if p.is_empty() || p == "!" {
-            return Err(bad("pattern is empty"));
-        }
-        // Spaces are fine (the pattern is quoted when written); control
-        // characters could break the line structure.
-        if p.chars().any(char::is_control) {
-            return Err(bad("pattern contains control characters"));
-        }
-    }
-    if !patterns.iter().any(|p| !p.starts_with('!')) {
-        return Err(EditError::InvalidAlias {
-            alias: patterns.join(" "),
-            reason: "a Host line needs at least one pattern without `!`",
-        });
-    }
-    let options = options
-        .iter()
-        .map(|(k, v)| {
-            let kw = match settable_keyword(k) {
-                Ok(kw) => kw.to_owned(),
-                Err(EditError::UnknownKeyword { .. })
-                    if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric()) =>
-                {
-                    k.clone()
-                }
-                Err(e) => return Err(e),
-            };
-            validate_value(&kw, v)?;
-            Ok((kw, v.clone()))
-        })
-        .collect::<Result<Vec<_>, EditError>>()?;
+    validate_patterns(patterns)?;
+    let options = importable_options(options)?;
     insert_host_block(doc, patterns, &options, position)
 }
 
+/// Insert a new `Host` block at `position`, separated from its neighbours
+/// the way the file separates blocks.
 fn insert_host_block(
     doc: &mut Document,
     patterns: &[String],
@@ -231,13 +208,8 @@ fn insert_host_block(
     let at = match position {
         Position::Auto => (0..doc.blocks().len())
             .find(|&bi| is_catch_all(doc, bi))
-            .map_or(doc.lines().len(), |bi| {
-                intro_start(doc, doc.blocks()[bi].lines().start)
-            }),
-        Position::Before(a) => {
-            let bi = first_block(doc, a)?;
-            intro_start(doc, doc.blocks()[bi].lines().start)
-        }
+            .map_or(doc.lines().len(), |bi| intro_start(doc, header_of(doc, bi))),
+        Position::Before(a) => intro_start(doc, header_of(doc, first_block(doc, a)?)),
         Position::After(a) => block_extent(doc, first_block(doc, a)?).end,
     };
 
@@ -295,11 +267,8 @@ pub fn set(
         return Err(EditError::NotAList(kw));
     }
     let bi = first_block(doc, alias)?;
-    let header = doc.blocks()[bi].lines().start;
-    let extent = block_extent(doc, bi);
-    let existing: Vec<usize> = (header + 1..extent.end)
-        .filter(|&i| doc.lines()[i].is_keyword(kw))
-        .collect();
+    let options = option_range(doc, bi);
+    let existing = keyword_lines(doc, options.clone(), kw);
 
     // Lines matched by keyword are directives, so `with_value` succeeds.
     let replacement = existing
@@ -309,16 +278,12 @@ pub fn set(
 
     preserving_final_newline(doc, |doc| {
         if let Some((first, line)) = replacement {
-            for &i in existing.iter().skip(1).rev() {
-                doc.splice(i..i + 1, []);
-            }
+            // Removing the later duplicates first leaves `first` in place.
+            remove_lines(doc, &existing[1..]);
             doc.replace_line(first, line);
         } else {
-            let at = (header + 1..extent.end)
-                .rev()
-                .find(|&i| doc.lines()[i].is_content())
-                .map_or(header + 1, |i| i + 1);
-            let (indent, sep) = Style::of(doc).for_block(doc, header);
+            let at = after_last_option(doc, options);
+            let (indent, sep) = Style::of(doc).for_block(doc, bi);
             let line = Line::directive(&indent, kw, &sep, value, doc.preferred_eol());
             doc.splice(at..at, [line]);
         }
@@ -333,22 +298,14 @@ pub fn set(
 /// If the alias is missing or the key does not occur in its block.
 pub fn unset(doc: &mut Document, alias: &str, key: &str) -> Result<(), EditError> {
     let bi = first_block(doc, alias)?;
-    let header = doc.blocks()[bi].lines().start;
-    let extent = block_extent(doc, bi);
-    let hits: Vec<usize> = (header + 1..extent.end)
-        .filter(|&i| doc.lines()[i].is_keyword(key))
-        .collect();
+    let hits = keyword_lines(doc, option_range(doc, bi), key);
     if hits.is_empty() {
         return Err(EditError::KeyNotSet {
             alias: alias.to_owned(),
             key: key.to_owned(),
         });
     }
-    preserving_final_newline(doc, |doc| {
-        for &i in hits.iter().rev() {
-            doc.splice(i..i + 1, []);
-        }
-    });
+    preserving_final_newline(doc, |doc| remove_lines(doc, &hits));
     Ok(())
 }
 
@@ -402,18 +359,13 @@ pub fn remove_forward(
             listen: format!("-{} {listen}", kind.flag()),
         });
     }
-    preserving_final_newline(doc, |doc| {
-        for &i in hits.iter().rev() {
-            doc.splice(i..i + 1, []);
-        }
-    });
+    preserving_final_newline(doc, |doc| remove_lines(doc, &hits));
     Ok(())
 }
 
 /// `(line index, forward)` for every parsable forward in block `bi`.
 fn block_forwards(doc: &Document, bi: usize) -> Vec<(usize, Forward)> {
-    let header = doc.blocks()[bi].lines().start;
-    (header + 1..block_extent(doc, bi).end)
+    option_range(doc, bi)
         .filter_map(|i| Some((i, forward_of(&doc.lines()[i])?.ok()?)))
         .collect()
 }
@@ -432,7 +384,7 @@ pub fn remove_host(doc: &mut Document, alias: &str) -> Result<(), EditError> {
     preserving_final_newline(doc, |doc| -> Result<(), EditError> {
         // Back to front, so earlier indices stay valid.
         for &bi in blocks.iter().rev() {
-            let header = doc.blocks()[bi].lines().start;
+            let header = header_of(doc, bi);
             let tokens = header_tokens(doc, header)?;
             let kept: Vec<&String> = tokens.iter().filter(|t| *t != alias).collect();
             if kept.is_empty() {
@@ -458,7 +410,7 @@ pub fn rename(doc: &mut Document, old: &str, new: &str) -> Result<(), EditError>
         return Err(EditError::AliasNotFound(old.to_owned()));
     }
     for bi in blocks {
-        let header = doc.blocks()[bi].lines().start;
+        let header = header_of(doc, bi);
         let tokens = header_tokens(doc, header)?;
         let renamed: Vec<String> = tokens
             .into_iter()
@@ -477,7 +429,7 @@ pub fn copy(doc: &mut Document, src: &str, dst: &str) -> Result<(), EditError> {
     validate_alias(dst)?;
     ensure_absent(doc, dst)?;
     let bi = first_block(doc, src)?;
-    let header = doc.blocks()[bi].lines().start;
+    let header = header_of(doc, bi);
     let end = block_extent(doc, bi).end;
 
     let renamed = doc.lines()[header]
@@ -490,213 +442,10 @@ pub fn copy(doc: &mut Document, src: &str, dst: &str) -> Result<(), EditError> {
 }
 
 // ---------------------------------------------------------------------------
-// Block geometry
+// Finding and rewriting Host lines
 // ---------------------------------------------------------------------------
 
-/// Start of the comment run that introduces the header at `header`: comment
-/// lines directly above it (no blank line between) that are not indented
-/// deeper than the header itself (deeper ones are commented-out options of
-/// the previous block).
-fn intro_start(doc: &Document, header: usize) -> usize {
-    let lines = doc.lines();
-    let depth = lines[header].indent().len();
-    let mut start = header;
-    while start > 0 && lines[start - 1].is_comment() && lines[start - 1].indent().len() <= depth {
-        start -= 1;
-    }
-    start
-}
-
-/// The lines that make up block `bi` for removal: intro comments, header,
-/// body up to the last option, and comments directly after it — but not
-/// blank lines or the next block's intro comments.
-fn block_extent(doc: &Document, bi: usize) -> Range<usize> {
-    let block = &doc.blocks()[bi];
-    let header = block.lines().start;
-    let limit = doc.blocks().get(bi + 1).map_or(block.lines().end, |next| {
-        intro_start(doc, next.lines().start)
-    });
-    let lines = doc.lines();
-
-    let mut end = (header + 1..limit)
-        .rev()
-        .find(|&i| lines[i].is_content())
-        .map_or(header + 1, |i| i + 1);
-    while end < limit && lines[end].is_comment() {
-        end += 1;
-    }
-    intro_start(doc, header)..end
-}
-
-/// Insert a block's lines at `at`, adding blank-line separators in a way
-/// that [`remove_range`] reverses exactly.
-fn insert_block(doc: &mut Document, at: usize, mut block: Vec<Line>, separated: bool) {
-    preserving_final_newline(doc, |doc| {
-        let eol = doc.preferred_eol();
-        for line in &mut block {
-            *line = Line::new(line.text(), eol);
-        }
-        let len = doc.lines().len();
-        let blank = |i: usize| doc.lines()[i].is_blank();
-
-        // Spacing follows the *local* style: between two directly adjacent
-        // lines (no blank between them) the block is inserted flush, even in
-        // a file that otherwise separates blocks with blank lines.
-        let prev_blank = at == 0 || blank(at - 1);
-        let next_blank = at == len || blank(at);
-        // In compact files nothing is added, except when blank lines already
-        // surround the insertion point: then one trailing blank keeps the
-        // edit reversible by `remove_range`.
-        let lead = separated && !prev_blank && next_blank;
-        let trail = len > 0 && prev_blank && (separated || next_blank);
-
-        let mut new = Vec::with_capacity(block.len() + 2);
-        if lead {
-            new.push(Line::blank(eol));
-        }
-        new.append(&mut block);
-        if trail {
-            new.push(Line::blank(eol));
-        }
-        doc.splice(at..at, new);
-    });
-}
-
-/// Remove `range`, then drop one now-redundant blank line so spacing
-/// returns to what it was before the block was inserted.
-fn remove_range(doc: &mut Document, range: Range<usize>) {
-    let at = range.start;
-    doc.splice(range, []);
-    let len = doc.lines().len();
-    let blank = |i: usize| doc.lines()[i].is_blank();
-    let blank_before = at > 0 && blank(at - 1);
-
-    if (at == 0 || blank_before) && at < len && blank(at) {
-        doc.splice(at..at + 1, []);
-    } else if blank_before && at == len {
-        doc.splice(at - 1..at, []);
-    }
-}
-
-/// Run `f`, then restore the document's final-newline convention: every
-/// line but the last gets a terminator, and the last has one iff it had one
-/// before (an empty document counts as "had one").
-fn preserving_final_newline<T>(doc: &mut Document, f: impl FnOnce(&mut Document) -> T) -> T {
-    let had_final_newline = doc.lines().last().is_none_or(|l| l.eol() != Eol::None);
-    let out = f(doc);
-    let eol = doc.preferred_eol();
-    let n = doc.lines().len();
-    for i in 0..n.saturating_sub(1) {
-        if doc.lines()[i].eol() == Eol::None {
-            doc.set_eol(i, eol);
-        }
-    }
-    if n > 0 {
-        let last = doc.lines()[n - 1].eol();
-        match (had_final_newline, last) {
-            (true, Eol::None) => doc.set_eol(n - 1, eol),
-            (false, _) => doc.set_eol(n - 1, Eol::None),
-            (true, _) => {}
-        }
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
-// Style detection
-// ---------------------------------------------------------------------------
-
-/// Formatting conventions observed in the document, used for new lines.
-struct Style {
-    header_keyword: String,
-    header_sep: String,
-    indent: String,
-    sep: String,
-    /// Whether blocks are separated by blank lines.
-    separated: bool,
-}
-
-impl Style {
-    fn of(doc: &Document) -> Self {
-        let lines = doc.lines();
-        let headers: Vec<usize> = doc
-            .blocks()
-            .iter()
-            .filter_map(crate::syntax::Block::header)
-            .collect();
-
-        let host_header = headers
-            .iter()
-            .map(|&h| &lines[h])
-            .find(|l| l.is_keyword("Host"));
-        let (header_keyword, header_sep) = host_header.map_or_else(
-            || ("Host".to_owned(), " ".to_owned()),
-            |l| {
-                let sep = l.separator().filter(|s| !s.is_empty()).unwrap_or(" ");
-                (l.keyword().unwrap_or("Host").to_owned(), sep.to_owned())
-            },
-        );
-
-        let body = doc.blocks().iter().skip(1).find_map(|b| {
-            doc.block_lines(b)
-                .iter()
-                .skip(1)
-                .find(|l| l.keyword().is_some() && !l.separator().unwrap_or_default().is_empty())
-        });
-        let (indent, sep) = body.map_or_else(
-            || ("    ".to_owned(), " ".to_owned()),
-            |l| {
-                (
-                    l.indent().to_owned(),
-                    l.separator().unwrap_or(" ").to_owned(),
-                )
-            },
-        );
-
-        // Compact only with positive evidence: some header directly follows
-        // other content, and none is preceded by a blank line.
-        let preceded_by = |blank: bool| {
-            headers.iter().any(|&h| {
-                let s = intro_start(doc, h);
-                s > 0 && lines[s - 1].is_blank() == blank
-            })
-        };
-        let separated = preceded_by(true) || !preceded_by(false);
-
-        Self {
-            header_keyword,
-            header_sep,
-            indent,
-            sep,
-            separated,
-        }
-    }
-
-    /// Indent and separator for a new option in the block at `header`: copy
-    /// the block's own first option, falling back to the file's style.
-    fn for_block(self, doc: &Document, header: usize) -> (String, String) {
-        let bi = doc
-            .blocks()
-            .iter()
-            .position(|b| b.header() == Some(header))
-            .expect("header indexes a block");
-        doc.block_lines(&doc.blocks()[bi])
-            .iter()
-            .skip(1)
-            .find(|l| l.keyword().is_some() && !l.separator().unwrap_or_default().is_empty())
-            .map_or((self.indent, self.sep), |l| {
-                (
-                    l.indent().to_owned(),
-                    l.separator().unwrap_or(" ").to_owned(),
-                )
-            })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
+/// The first block naming `alias` literally: the one ssh reads first.
 fn first_block(doc: &Document, alias: &str) -> Result<usize, EditError> {
     find_alias(doc, alias)
         .first()
@@ -704,17 +453,19 @@ fn first_block(doc: &Document, alias: &str) -> Result<usize, EditError> {
         .ok_or_else(|| EditError::AliasNotFound(alias.to_owned()))
 }
 
+/// Refuse to create `alias` if a block already names it.
 fn ensure_absent(doc: &Document, alias: &str) -> Result<(), EditError> {
     match find_alias(doc, alias).first() {
         Some(&bi) => Err(EditError::AliasExists {
             alias: alias.to_owned(),
-            line: doc.blocks()[bi].lines().start + 1,
+            line: header_of(doc, bi) + 1,
         }),
         None => Ok(()),
     }
 }
 
-/// `Host *` (with `*` as a positive pattern) or `Match all`.
+/// `Host *` (with `*` as a positive pattern) or `Match all`: a block of
+/// defaults for every host, which new blocks must go before.
 fn is_catch_all(doc: &Document, bi: usize) -> bool {
     let block = &doc.blocks()[bi];
     match block.kind() {
@@ -728,11 +479,14 @@ fn is_catch_all(doc: &Document, bi: usize) -> bool {
     }
 }
 
+/// The patterns on the `Host` line at `header`, unquoted.
 fn header_tokens(doc: &Document, header: usize) -> Result<Vec<String>, EditError> {
     split_args(doc.lines()[header].value().unwrap_or_default())
         .map_err(|_| EditError::UnparsableHost(header + 1))
 }
 
+/// Replace the patterns on the `Host` line at `header`, quoting as needed;
+/// the line's indent, keyword spelling, and separator are kept.
 fn rewrite_header<'a>(
     doc: &mut Document,
     header: usize,
@@ -743,55 +497,6 @@ fn rewrite_header<'a>(
         .with_value(&value.join(" "))
         .expect("header is a directive");
     doc.replace_line(header, line);
-}
-
-fn validate_alias(alias: &str) -> Result<(), EditError> {
-    let reason = if alias.is_empty() {
-        "it is empty"
-    } else if alias.contains(['*', '?']) {
-        "it contains a wildcard (aliases must be literal names)"
-    } else if alias.starts_with('!') {
-        "it starts with `!`"
-    } else if alias.chars().any(char::is_whitespace) {
-        "it contains whitespace"
-    } else if alias.chars().any(char::is_control) {
-        "it contains control characters"
-    } else {
-        return Ok(());
-    };
-    Err(EditError::InvalidAlias {
-        alias: alias.to_owned(),
-        reason,
-    })
-}
-
-fn settable_keyword(name: &str) -> Result<&'static str, EditError> {
-    let Some(kw) = keyword::canonical(name) else {
-        return Err(EditError::UnknownKeyword {
-            name: name.to_owned(),
-            hint: keyword::hint(name),
-        });
-    };
-    if keyword::is_structural(kw) {
-        return Err(EditError::ReservedKeyword(kw));
-    }
-    Ok(kw)
-}
-
-fn validate_value(key: &str, value: &str) -> Result<(), EditError> {
-    let reason = if value.trim().is_empty() {
-        "it is empty (use `unset` to remove an option)"
-    } else if value.chars().any(|c| c.is_control() && c != '\t') {
-        "it contains a line break or control character"
-    } else if value != value.trim() {
-        "it has leading or trailing whitespace"
-    } else {
-        return Ok(());
-    };
-    Err(EditError::InvalidValue {
-        key: key.to_owned(),
-        reason,
-    })
 }
 
 #[cfg(test)]

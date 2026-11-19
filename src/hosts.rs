@@ -111,7 +111,7 @@ fn entry(doc: &Document, idx: usize) -> HostEntry {
     let patterns =
         split_args(raw).unwrap_or_else(|_| raw.split_whitespace().map(str::to_owned).collect());
 
-    let body = &doc.lines()[header + 1..b.lines().end];
+    let body = &doc.lines()[b.body()];
     let values = |kw: &'static str| {
         body.iter()
             .filter(move |l| l.is_keyword(kw))

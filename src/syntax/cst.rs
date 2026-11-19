@@ -194,6 +194,14 @@ impl Block {
             BlockKind::Host | BlockKind::Match => Some(self.lines.start),
         }
     }
+
+    /// Index range of the lines after the header: the whole block for the
+    /// global block, which has no header. Like [`Block::lines`], this
+    /// includes any comments and blank lines up to the next header.
+    pub fn body(&self) -> Range<usize> {
+        let start = self.lines.start + usize::from(self.header().is_some());
+        start..self.lines.end
+    }
 }
 
 /// A parsed ssh config file.

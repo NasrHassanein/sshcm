@@ -131,8 +131,7 @@ fn walk(
             continue;
         }
 
-        let body_start = range.start + usize::from(header.is_some());
-        for idx in body_start..range.end {
+        for idx in block.body() {
             let line = &doc.lines()[idx];
             if !line.is_keyword("Include") {
                 apply(line, path, idx + 1, res);

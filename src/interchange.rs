@@ -75,7 +75,7 @@ pub fn export(set: &ConfigSet) -> Export {
             let header = block.lines().start;
             let raw = file.doc.lines()[header].value().unwrap_or_default();
             let host = split_args(raw).ok()?;
-            let options = file.doc.lines()[header + 1..block.lines().end]
+            let options = file.doc.lines()[block.body()]
                 .iter()
                 .filter(|l| !l.is_keyword("Include"))
                 .filter_map(|l| {

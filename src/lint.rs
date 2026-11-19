@@ -406,7 +406,7 @@ fn shadowed_options(set: &ConfigSet, ctx: &LintContext, out: &mut Vec<Finding>) 
             continue; // e.g. `Host a !a`
         }
         let res = resolve(set, &alias, &rctx);
-        for idx in block.lines().skip(1) {
+        for idx in block.body() {
             let line = &file.doc.lines()[idx];
             let Some(kw) = line.keyword().and_then(keyword::canonical) else {
                 continue;

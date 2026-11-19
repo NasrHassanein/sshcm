@@ -104,6 +104,13 @@ mod tests {
     }
 
     #[test]
+    fn body_excludes_only_the_header() {
+        let doc = Document::parse("User me\nHost a\n  Port 1\n# c\nHost b\n");
+        let bodies: Vec<_> = doc.blocks().iter().map(Block::body).collect();
+        assert_eq!(bodies, vec![0..1, 2..4, 5..5]);
+    }
+
+    #[test]
     fn global_block_is_empty_when_file_starts_with_host() {
         let doc = Document::parse("Host a\n");
         assert_eq!(doc.blocks()[0].lines(), 0..0);

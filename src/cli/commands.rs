@@ -1,5 +1,6 @@
-//! Subcommand implementations. Each takes parsed input and returns the text
-//! to print, so they can be unit-tested without touching stdout.
+//! Read-only subcommands. Each takes parsed input and returns what to
+//! print (a `String`, or an [`Output`] when there are also notes for
+//! stderr), so they can be unit-tested without touching stdout or stderr.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -18,6 +19,24 @@ use sshcm::syntax::{BlockKind, Document, Line, LineKind};
 use super::{NotFound, table};
 
 const NONE: &str = "-";
+
+/// What a command prints: `stdout` is the result itself (what a script
+/// would capture); `notes` are messages for the person at the terminal,
+/// printed to stderr before it.
+#[derive(Debug, Default)]
+pub struct Output {
+    pub stdout: String,
+    pub notes: Vec<String>,
+}
+
+impl From<String> for Output {
+    fn from(stdout: String) -> Self {
+        Self {
+            stdout,
+            notes: Vec::new(),
+        }
+    }
+}
 
 /// `path` for display: the home directory abbreviated to `~`.
 pub fn display(path: &Path) -> String {
@@ -117,7 +136,7 @@ struct ForwardRow<'a> {
 }
 
 /// `forward list [ALIAS]`: one row per forward, in ssh's reading order.
-pub fn forward_list(set: &ConfigSet, alias: Option<&str>, json: bool) -> Result<String> {
+pub fn forward_list(set: &ConfigSet, alias: Option<&str>, json: bool) -> Result<Output> {
     let entries: Vec<_> = host_entries_in(set)
         .into_iter()
         .filter(|e| alias.is_none_or(|a| e.entry.patterns.iter().any(|p| p == a)))
@@ -142,11 +161,13 @@ pub fn forward_list(set: &ConfigSet, alias: Option<&str>, json: bool) -> Result<
         .collect();
 
     if json {
-        return Ok(serde_json::to_string_pretty(&rows)? + "\n");
+        return Ok((serde_json::to_string_pretty(&rows)? + "\n").into());
     }
     if rows.is_empty() {
-        eprintln!("No forwards.");
-        return Ok(String::new());
+        return Ok(Output {
+            stdout: String::new(),
+            notes: vec!["No forwards.".to_owned()],
+        });
     }
     let table: Vec<Vec<String>> = rows
         .iter()
@@ -165,10 +186,7 @@ pub fn forward_list(set: &ConfigSet, alias: Option<&str>, json: bool) -> Result<
             ]
         })
         .collect();
-    Ok(table::render(
-        &["HOST", "TYPE", "LISTEN", "TARGET", "SOURCE"],
-        &table,
-    ))
+    Ok(table::render(&["HOST", "TYPE", "LISTEN", "TARGET", "SOURCE"], &table).into())
 }
 
 #[derive(Serialize)]
@@ -228,20 +246,19 @@ pub fn show(set: &ConfigSet, alias: &str, json: bool) -> Result<String> {
     Ok(out)
 }
 
-pub fn resolve(
-    set: &ConfigSet,
-    host: &str,
-    local_user: &str,
-    json: bool,
-) -> Result<(String, Vec<String>)> {
+pub fn resolve(set: &ConfigSet, host: &str, local_user: &str, json: bool) -> Result<Output> {
     let ctx = ResolveContext {
         local_user: local_user.to_owned(),
     };
     let res = resolve_host(set, host, &ctx);
-    let warnings = format_diagnostics(res.warnings.iter());
+    let notes = format_diagnostics(res.warnings.iter())
+        .into_iter()
+        .map(|w| format!("warning: {w}"))
+        .collect();
 
     if json {
-        return Ok((serde_json::to_string_pretty(&res)? + "\n", warnings));
+        let stdout = serde_json::to_string_pretty(&res)? + "\n";
+        return Ok(Output { stdout, notes });
     }
     let root = &set.root().path;
     let rows: Vec<Vec<String>> = res
@@ -257,7 +274,7 @@ pub fn resolve(
             vec![s.keyword.clone(), args.join(" "), source]
         })
         .collect();
-    let out = if rows.is_empty() {
+    let stdout = if rows.is_empty() {
         format!("# no settings in this configuration apply to `{host}`\n")
     } else {
         // Headerless table: drop the (empty) header row.
@@ -265,7 +282,7 @@ pub fn resolve(
         t.split_once('\n')
             .map_or(t.clone(), |(_, rest)| rest.to_owned())
     };
-    Ok((out, warnings))
+    Ok(Output { stdout, notes })
 }
 
 pub fn dump_syntax(doc: &Document) -> String {

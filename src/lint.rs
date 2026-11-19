@@ -77,15 +77,12 @@ pub fn lint(set: &ConfigSet, ctx: &LintContext) -> Vec<Finding> {
 
     for (fid, file) in set.files().iter().enumerate() {
         line_checks(set, fid, &ignored, ctx, &mut out);
-        if ctx.check_files
-            && fid == 0
-            && let Some(problem) = writable_by_others(&file.path)
-        {
+        if ctx.check_files && fid == 0 && crate::io::writable_by_others(&file.path) {
             out.push(finding(
                 "E004",
                 &file.path,
                 0,
-                format!("{problem}; ssh refuses to use it (\"Bad owner or permissions\")"),
+                "file is writable by group or others; ssh refuses to use it (\"Bad owner or permissions\")".into(),
             ));
         }
     }
@@ -175,9 +172,7 @@ fn line_checks(
 
             let Some(canon) = keyword::canonical(kw) else {
                 if !is_ignored {
-                    let hint = keyword::suggest(kw)
-                        .map(|s| format!(" (did you mean `{s}`?)"))
-                        .unwrap_or_default();
+                    let hint = keyword::hint(kw);
                     out.push(finding(
                         "E001",
                         path,
@@ -416,9 +411,7 @@ fn shadowed_options(set: &ConfigSet, ctx: &LintContext, out: &mut Vec<Finding>) 
             let Some(kw) = line.keyword().and_then(keyword::canonical) else {
                 continue;
             };
-            if keyword::merge_rule(kw) == Merge::Accumulate
-                || matches!(kw, "Include" | "Host" | "Match")
-            {
+            if keyword::merge_rule(kw) == Merge::Accumulate || keyword::is_structural(kw) {
                 continue;
             }
             if let Some(winner) = res.get(kw)
@@ -500,11 +493,6 @@ fn forward_conflicts(set: &ConfigSet, ctx: &LintContext, out: &mut Vec<Finding>)
 // ---------------------------------------------------------------------------
 // Filesystem checks
 // ---------------------------------------------------------------------------
-
-fn writable_by_others(path: &Path) -> Option<&'static str> {
-    let mode = std::fs::metadata(path).ok()?.permissions().mode();
-    (mode & 0o022 != 0).then_some("file is writable by group or others")
-}
 
 fn identity_problem(raw: &str, home: &Path) -> Option<String> {
     if raw.contains('%') || raw.contains("${") || raw.eq_ignore_ascii_case("none") {

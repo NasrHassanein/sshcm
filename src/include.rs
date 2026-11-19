@@ -239,8 +239,8 @@ impl ConfigSet {
                 return None;
             }
         };
-        if let Some(problem) = permission_problem(path) {
-            self.diag(fid, line, format!("{shown}: {problem}; ssh refuses the whole configuration (\"Bad owner or permissions\")"));
+        if crate::io::writable_by_others(path) {
+            self.diag(fid, line, format!("{shown}: writable by group or others; ssh refuses the whole configuration (\"Bad owner or permissions\")"));
         }
 
         self.files.push(ConfigFile {
@@ -254,12 +254,6 @@ impl ConfigSet {
         stack.pop();
         Some(child)
     }
-}
-
-fn permission_problem(path: &Path) -> Option<&'static str> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = fs::metadata(path).ok()?.permissions().mode();
-    (mode & 0o022 != 0).then_some("writable by group or others")
 }
 
 /// Expand an `Include` value into the existing paths it names, in the

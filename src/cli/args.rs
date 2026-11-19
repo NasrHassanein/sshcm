@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use sshcm::edit::Position;
 use sshcm::model::forward::ForwardKind;
 
 #[derive(Debug, Parser)]
@@ -82,33 +83,7 @@ pub enum Command {
     },
 
     /// Add a new Host block (placed before `Host *` by default)
-    Add {
-        /// The new alias
-        alias: String,
-        /// HostName: the real host name or IP to connect to
-        #[arg(long, value_name = "HOST")]
-        hostname: Option<String>,
-        /// Remote user name
-        #[arg(short, long)]
-        user: Option<String>,
-        /// Port number
-        #[arg(short, long)]
-        port: Option<u16>,
-        /// IdentityFile: private key path
-        #[arg(short, long, value_name = "PATH")]
-        identity: Option<String>,
-        /// Any other option, e.g. -o ProxyJump=bastion (repeatable)
-        #[arg(short = 'o', long = "option", value_name = "KEY=VALUE", value_parser = parse_kv)]
-        options: Vec<(String, String)>,
-        #[command(flatten)]
-        forwards: ForwardSpecs,
-        /// Insert before this alias's block
-        #[arg(long, value_name = "ALIAS", conflicts_with = "after")]
-        before: Option<String>,
-        /// Insert after this alias's block
-        #[arg(long, value_name = "ALIAS")]
-        after: Option<String>,
-    },
+    Add(AddArgs),
 
     /// Set options in a Host block, e.g. `set web Port=2222 User=deploy`
     Set {
@@ -233,6 +208,66 @@ pub enum Command {
     DumpSyntax,
 }
 
+/// The arguments of `add`, in the order `--help` lists them.
+#[derive(Debug, Args)]
+pub struct AddArgs {
+    /// The new alias
+    pub alias: String,
+    /// HostName: the real host name or IP to connect to
+    #[arg(long, value_name = "HOST")]
+    pub hostname: Option<String>,
+    /// Remote user name
+    #[arg(short, long)]
+    pub user: Option<String>,
+    /// Port number
+    #[arg(short, long)]
+    pub port: Option<u16>,
+    /// IdentityFile: private key path
+    #[arg(short, long, value_name = "PATH")]
+    pub identity: Option<String>,
+    /// Any other option, e.g. -o ProxyJump=bastion (repeatable)
+    #[arg(short = 'o', long = "option", value_name = "KEY=VALUE", value_parser = parse_kv)]
+    pub options: Vec<(String, String)>,
+    #[command(flatten)]
+    pub forwards: ForwardSpecs,
+    #[command(flatten)]
+    pub placement: PlacementArgs,
+}
+
+/// `--before` / `--after`: where `add` and `parse add` insert the new block.
+#[derive(Debug, Args)]
+pub struct PlacementArgs {
+    /// Insert before this alias's block
+    #[arg(long, value_name = "ALIAS", conflicts_with = "after")]
+    pub before: Option<String>,
+    /// Insert after this alias's block
+    #[arg(long, value_name = "ALIAS")]
+    pub after: Option<String>,
+}
+
+impl PlacementArgs {
+    /// The insert position the flags ask for (clap makes them mutually
+    /// exclusive); `Auto` when neither is given.
+    pub fn position(&self) -> Position {
+        match (&self.before, &self.after) {
+            (Some(a), _) => Position::Before(a.clone()),
+            (_, Some(a)) => Position::After(a.clone()),
+            (None, None) => Position::Auto,
+        }
+    }
+}
+
+/// `parse view | add`: the ssh command, and the alias to file it under.
+#[derive(Debug, Args)]
+pub struct SshCommandArgs {
+    /// Name the entry ALIAS (adds HostName); default: the destination host
+    #[arg(long = "as", value_name = "ALIAS")]
+    pub alias: Option<String>,
+    /// The ssh command, quoted as one argument: "ssh -i KEY user@host -p 22"
+    #[arg(required = true, num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true, value_name = "SSH_COMMAND")]
+    pub command: Vec<String>,
+}
+
 /// `-L/-R/-D` in ssh's own command-line syntax; written to the config in
 /// config syntax (`-L 8080:db:80` becomes `LocalForward 8080 db:80`).
 #[derive(Debug, Args, Clone, Default)]
@@ -304,27 +339,15 @@ pub enum ParseAction {
     /// Print the Host record for an ssh command, as it would be written
     #[command(visible_alias = "show")]
     View {
-        /// Name the entry ALIAS (adds HostName); default: the destination host
-        #[arg(long = "as", value_name = "ALIAS")]
-        alias: Option<String>,
-        /// The ssh command, quoted as one argument: "ssh -i KEY user@host -p 22"
-        #[arg(required = true, num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true, value_name = "SSH_COMMAND")]
-        command: Vec<String>,
+        #[command(flatten)]
+        ssh: SshCommandArgs,
     },
     /// Add the Host record for an ssh command to the config
     Add {
-        /// Name the entry ALIAS (adds HostName); default: the destination host
-        #[arg(long = "as", value_name = "ALIAS")]
-        alias: Option<String>,
-        /// Insert before this alias's block
-        #[arg(long, value_name = "ALIAS", conflicts_with = "after")]
-        before: Option<String>,
-        /// Insert after this alias's block
-        #[arg(long, value_name = "ALIAS")]
-        after: Option<String>,
-        /// The ssh command, quoted as one argument: "ssh -i KEY user@host -p 22"
-        #[arg(required = true, num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true, value_name = "SSH_COMMAND")]
-        command: Vec<String>,
+        #[command(flatten)]
+        ssh: SshCommandArgs,
+        #[command(flatten)]
+        placement: PlacementArgs,
     },
 }
 

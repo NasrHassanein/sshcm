@@ -1,5 +1,18 @@
 //! The command-line front end: argument parsing, file I/O, dispatch, and
 //! exit codes. Everything interesting lives in the library.
+//!
+//! [`run`] matches the subcommand once and hands its arguments to a
+//! handler. Handlers follow one of two paths:
+//!
+//! - **read** (`list`, `show`, `resolve`, `lint`, …): load the config and
+//!   everything it includes ([`load_set`]), compute the output in
+//!   [`commands`] or [`ops`], and print it;
+//! - **write** (`add`, `set`, `rm`, `forward add`, …): pick the file to edit
+//!   ([`owner`]: the one whose block ssh reads first), then run the edit in
+//!   [`mutate::transaction`], which locks, diffs, asks, validates with
+//!   `ssh -G`, backs up, and replaces the file atomically.
+//!
+//! Errors are mapped to exit codes by [`exit_code`].
 
 mod args;
 mod commands;
@@ -15,7 +28,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{CommandFactory, Parser};
 use sshcm::command::{parse_ssh_command, shell_split};
-use sshcm::edit::{self, EditError, Position};
+use sshcm::edit::{self, EditError};
 use sshcm::format::FormatOptions;
 use sshcm::hosts::find_alias_in;
 use sshcm::include::{ConfigSet, IncludeContext};
@@ -24,11 +37,23 @@ use sshcm::model::forward::{Forward, parse_listen};
 use sshcm::model::value::quote;
 use sshcm::syntax::Document;
 
-use args::{BackupAction, Cli, Command, ForwardAction, ForwardSpecs, ParseAction, WriteOpts};
-use commands::{display, format_diagnostics};
+use args::{
+    AddArgs, BackupAction, Cli, Command, ForwardAction, ForwardSpecs, ParseAction, WriteOpts,
+};
+use commands::{Output, display, format_diagnostics};
 use mutate::{ValidationFailed, transaction};
 
-/// Exit codes (stable once released). 2 is clap's usage error.
+/// Exit codes. These are a stable interface: scripts rely on them.
+///
+/// | code | meaning |
+/// |------|---------|
+/// | 0 | success (including "no changes" and a cancelled prompt) |
+/// | 1 | any other error |
+/// | 2 | invalid command line (reported by clap) |
+/// | 3 | alias, option, or forward not found |
+/// | 4 | `lint` found errors (or warnings, with `--strict`) |
+/// | 5 | ssh rejected the edited config; nothing was written |
+/// | 6 | another sshcm process holds the lock |
 mod exit {
     pub const ERROR: u8 = 1;
     pub const NOT_FOUND: u8 = 3;
@@ -114,50 +139,26 @@ fn ensure_absent(set: &ConfigSet, alias: &str) -> Result<()> {
     ))
 }
 
-/// The options and position for `add`, from its flags: the dedicated
-/// flags first (in `ssh_config`'s conventional order), then `-o` options.
-fn add_args(cmd: &Command) -> Result<(Vec<(String, String)>, Position)> {
-    let Command::Add {
-        hostname,
-        user,
-        port,
-        identity,
-        options,
-        before,
-        after,
-        forwards,
-        ..
-    } = cmd
-    else {
-        unreachable!("add_args is only called for `add`");
-    };
+/// The options for `add`, from its flags: the dedicated flags first (in
+/// `ssh_config`'s conventional order), then `-o` options, then forwards.
+fn add_options(args: &AddArgs) -> Result<Vec<(String, String)>> {
     let mut opts: Vec<(String, String)> = [
-        ("HostName", hostname.clone()),
-        ("User", user.clone()),
-        ("Port", port.map(|p| p.to_string())),
+        ("HostName", args.hostname.clone()),
+        ("User", args.user.clone()),
+        ("Port", args.port.map(|p| p.to_string())),
         (
             "IdentityFile",
-            identity.as_deref().map(|i| quote(i).into_owned()),
+            args.identity.as_deref().map(|i| quote(i).into_owned()),
         ),
     ]
     .into_iter()
     .filter_map(|(k, v)| v.map(|v| (k.to_owned(), v)))
     .collect();
-    opts.extend(options.iter().cloned());
-    for f in parse_forwards(forwards)? {
+    opts.extend(args.options.iter().cloned());
+    for f in parse_forwards(&args.forwards)? {
         opts.push((f.keyword().to_owned(), f.to_config_value()));
     }
-    Ok((opts, placement(before.as_deref(), after.as_deref())))
-}
-
-/// Where to insert a new block, from the `--before` / `--after` flags
-/// (clap makes them mutually exclusive).
-fn placement(before: Option<&str>, after: Option<&str>) -> Position {
-    match (before, after) {
-        (Some(a), _) => Position::Before(a.to_owned()),
-        (_, Some(a)) => Position::After(a.to_owned()),
-        (None, None) => Position::Auto,
-    }
+    Ok(opts)
 }
 
 /// Parse `-L/-R/-D` specs (ssh command-line syntax).
@@ -179,12 +180,11 @@ fn forward_command(path: &Path, w: &WriteOpts, action: &ForwardAction) -> Result
         Ok(())
     };
     match action {
-        ForwardAction::List { alias, json } => {
-            print!(
-                "{}",
-                commands::forward_list(&load_set(path, false)?, alias.as_deref(), *json)?
-            );
-        }
+        ForwardAction::List { alias, json } => print(commands::forward_list(
+            &load_set(path, false)?,
+            alias.as_deref(),
+            *json,
+        )?),
         ForwardAction::Add { alias, specs } => {
             need_specs(specs)?;
             let forwards = parse_forwards(specs)?;
@@ -193,7 +193,7 @@ fn forward_command(path: &Path, w: &WriteOpts, action: &ForwardAction) -> Result
                 forwards
                     .iter()
                     .try_for_each(|f| edit::add_forward(d, alias, f))
-            })?;
+            })
         }
         ForwardAction::Rm { alias, specs } => {
             need_specs(specs)?;
@@ -210,10 +210,9 @@ fn forward_command(path: &Path, w: &WriteOpts, action: &ForwardAction) -> Result
                 listens
                     .iter()
                     .try_for_each(|(kind, listen)| edit::remove_forward(d, alias, *kind, listen))
-            })?;
+            })
         }
     }
-    Ok(())
 }
 
 /// The ssh command's words: one quoted argument is shell-split; several
@@ -231,13 +230,10 @@ fn command_words(args: &[String]) -> Result<Vec<String>> {
 
 /// `parse view | add`.
 fn parse_command(path: &Path, w: &WriteOpts, action: &ParseAction) -> Result<()> {
-    let (alias, command) = match action {
-        ParseAction::View { alias, command } | ParseAction::Add { alias, command, .. } => {
-            (alias, command)
-        }
-    };
-    let parsed = parse_ssh_command(&command_words(command)?).context("parsing the ssh command")?;
-    let alias = alias.clone().unwrap_or_else(|| parsed.host.clone());
+    let (ParseAction::View { ssh } | ParseAction::Add { ssh, .. }) = action;
+    let parsed =
+        parse_ssh_command(&command_words(&ssh.command)?).context("parsing the ssh command")?;
+    let alias = ssh.alias.clone().unwrap_or_else(|| parsed.host.clone());
     let options = parsed.options_for(&alias);
 
     for s in &parsed.skipped {
@@ -255,59 +251,131 @@ fn parse_command(path: &Path, w: &WriteOpts, action: &ParseAction) -> Result<()>
             if let Err(e) = ensure_absent(&set, &alias) {
                 eprintln!("note: {e:#}; `parse add` would refuse it (use --as NAME)");
             }
-            print!(
-                "{}",
-                edit::render_host_block(&set.root().doc, &alias, &options)?
-            );
+            print(edit::render_host_block(&set.root().doc, &alias, &options)?)
         }
-        ParseAction::Add { before, after, .. } => {
+        ParseAction::Add { placement, .. } => {
             if let Err(e) = ensure_absent(&set, &alias) {
                 bail!("{e:#}; use --as NAME to add it under another alias");
             }
-            let position = placement(before.as_deref(), after.as_deref());
+            let position = placement.position();
             transaction(path, w, &alias, |d| {
                 edit::add_host(d, &alias, &options, &position)
-            })?;
+            })
         }
     }
-    Ok(())
 }
 
+/// Run the parsed command line: one arm per subcommand.
+// Long, but flat: one short arm per subcommand. Splitting it to satisfy the
+// line count would bring back the second-level `match`es (with
+// `unreachable!()` arms) that this single dispatch replaced.
+#[allow(clippy::too_many_lines)]
 fn run(cli: &Cli) -> Result<()> {
-    // Commands that don't touch a config file.
+    // Resolved on demand, so `completions` and `manpage` work even when
+    // there is no home directory to find the default config in.
+    let config = || config_path(cli);
+    let w = &cli.write;
+
     match &cli.command {
+        // Commands that don't touch a config file. clap's generators panic
+        // on write errors (such as a closed pipe), so render into memory.
         Command::Completions { shell } => {
-            // `generate` panics on write errors, so render into memory first.
             let mut out = Vec::new();
             clap_complete::generate(*shell, &mut Cli::command(), "sshcm", &mut out);
-            return write_stdout(&out);
+            write_stdout(&out)
         }
         Command::Manpage => {
             let mut out = Vec::new();
             clap_mangen::Man::new(Cli::command()).render(&mut out)?;
-            return write_stdout(&out);
+            write_stdout(&out)
         }
-        _ => {}
-    }
 
-    let path = config_path(cli)?;
-    let w = &cli.write;
-    match &cli.command {
-        Command::List { .. }
-        | Command::Show { .. }
-        | Command::Resolve { .. }
-        | Command::DumpSyntax => write_stdout(read_command(cli, &path)?.as_bytes())?,
+        // Read-only queries.
+        Command::List { pattern, json } => print(commands::list(
+            &load_set(&config()?, false)?,
+            pattern.as_deref(),
+            *json,
+        )?),
+        Command::Show { alias, json } => {
+            print(commands::show(&load_set(&config()?, false)?, alias, *json)?)
+        }
+        Command::Resolve {
+            host,
+            via_ssh: true,
+            ..
+        } => print(ssh::effective_config(&config()?, host)?),
+        Command::Resolve { host, json, .. } => print(commands::resolve(
+            &load_set(&config()?, false)?,
+            host,
+            &local_user(),
+            *json,
+        )?),
+        Command::DumpSyntax => {
+            let path = config()?;
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            print(commands::dump_syntax(&Document::parse(&text)))
+        }
+
+        // Edits to one Host block.
+        Command::Add(args) => {
+            let path = config()?;
+            ensure_absent(&load_set(&path, true)?, &args.alias)?;
+            let opts = add_options(args)?;
+            let position = args.placement.position();
+            transaction(&path, w, &args.alias, |d| {
+                edit::add_host(d, &args.alias, &opts, &position)
+            })
+        }
+        Command::Set {
+            alias,
+            settings,
+            append,
+        } => {
+            let target = owner(&load_set(&config()?, false)?, alias)?;
+            transaction(&target, w, alias, |d| {
+                settings
+                    .iter()
+                    .try_for_each(|(k, v)| edit::set(d, alias, k, v, *append))
+            })
+        }
+        Command::Unset { alias, keys } => {
+            let target = owner(&load_set(&config()?, false)?, alias)?;
+            transaction(&target, w, alias, |d| {
+                keys.iter().try_for_each(|k| edit::unset(d, alias, k))
+            })
+        }
+        Command::Rm { alias } => {
+            let target = owner(&load_set(&config()?, false)?, alias)?;
+            transaction(&target, w, alias, |d| edit::remove_host(d, alias))
+        }
+        Command::Rename { old, new } => {
+            let set = load_set(&config()?, false)?;
+            ensure_absent(&set, new)?;
+            let target = owner(&set, old)?;
+            transaction(&target, w, new, |d| edit::rename(d, old, new))
+        }
+        Command::Cp { src, dst } => {
+            let set = load_set(&config()?, false)?;
+            ensure_absent(&set, dst)?;
+            let target = owner(&set, src)?;
+            transaction(&target, w, dst, |d| edit::copy(d, src, dst))
+        }
+        Command::Forward { action } => forward_command(&config()?, w, action),
+        Command::Parse { action } => parse_command(&config()?, w, action),
+
+        // Whole-config operations.
         Command::Lint {
             strict,
             json,
             no_file_checks,
         } => ops::lint(
-            &load_set(&path, false)?,
+            &load_set(&config()?, false)?,
             &local_user(),
             *strict,
             *json,
             !*no_file_checks,
-        )?,
+        ),
         Command::Fmt {
             check,
             indent,
@@ -321,106 +389,37 @@ fn run(cli: &Cli) -> Result<()> {
                     " ".repeat(*indent)
                 },
             };
-            ops::fmt(&load_set(&path, false)?, &opts, *check, *all, w)?;
+            ops::fmt(&load_set(&config()?, false)?, &opts, *check, *all, w)
         }
-        Command::Export => ops::export_json(&load_set(&path, false)?)?,
+        Command::Export => ops::export_json(&load_set(&config()?, false)?),
         Command::Import {
             source,
             skip_existing,
-        } => ops::import(&path, &load_set(&path, true)?, source, *skip_existing, w)?,
-        Command::Backup { action } => match action {
-            BackupAction::List => ops::backup_list(&path)?,
-            BackupAction::Restore { id } => ops::backup_restore(&path, id, w)?,
-        },
-        Command::Forward { action } => forward_command(&path, w, action)?,
-        Command::Parse { action } => parse_command(&path, w, action)?,
-        Command::Completions { .. } | Command::Manpage => unreachable!("handled above"),
-        _ => edit_command(cli, &path)?,
-    }
-    Ok(())
-}
-
-/// `list`, `show`, `resolve`, `dump-syntax`: return the text to print.
-fn read_command(cli: &Cli, path: &Path) -> Result<String> {
-    let path = path.to_owned();
-    Ok(match &cli.command {
-        Command::List { pattern, json } => {
-            commands::list(&load_set(&path, false)?, pattern.as_deref(), *json)?
-        }
-        Command::Show { alias, json } => commands::show(&load_set(&path, false)?, alias, *json)?,
-        Command::Resolve {
-            host,
-            via_ssh: true,
-            ..
-        } => ssh::effective_config(&path, host)?,
-        Command::Resolve { host, json, .. } => {
-            let set = load_set(&path, false)?;
-            let (out, warnings) = commands::resolve(&set, host, &local_user(), *json)?;
-            for w in warnings {
-                eprintln!("warning: {w}");
-            }
-            out
-        }
-        Command::DumpSyntax => {
-            let text = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            commands::dump_syntax(&Document::parse(&text))
-        }
-        _ => unreachable!("not a read command"),
-    })
-}
-
-/// `add`, `set`, `unset`, `rm`, `rename`, `cp`.
-fn edit_command(cli: &Cli, path: &Path) -> Result<()> {
-    let path = path.to_owned();
-    let w = &cli.write;
-    match &cli.command {
-        Command::Add { alias, .. } => {
-            ensure_absent(&load_set(&path, true)?, alias)?;
-            let (opts, position) = add_args(&cli.command)?;
-            transaction(&path, w, alias, |d| {
-                edit::add_host(d, alias, &opts, &position)
-            })?;
-        }
-        Command::Set {
-            alias,
-            settings,
-            append,
         } => {
-            let target = owner(&load_set(&path, false)?, alias)?;
-            transaction(&target, w, alias, |d| {
-                settings
-                    .iter()
-                    .try_for_each(|(k, v)| edit::set(d, alias, k, v, *append))
-            })?;
+            let path = config()?;
+            ops::import(&path, &load_set(&path, true)?, source, *skip_existing, w)
         }
-        Command::Unset { alias, keys } => {
-            let target = owner(&load_set(&path, false)?, alias)?;
-            transaction(&target, w, alias, |d| {
-                keys.iter().try_for_each(|k| edit::unset(d, alias, k))
-            })?;
+        Command::Backup { action } => {
+            let path = config()?;
+            match action {
+                BackupAction::List => ops::backup_list(&path),
+                BackupAction::Restore { id } => ops::backup_restore(&path, id, w),
+            }
         }
-        Command::Rm { alias } => {
-            let target = owner(&load_set(&path, false)?, alias)?;
-            transaction(&target, w, alias, |d| edit::remove_host(d, alias))?;
-        }
-        Command::Rename { old, new } => {
-            let set = load_set(&path, false)?;
-            ensure_absent(&set, new)?;
-            let target = owner(&set, old)?;
-            transaction(&target, w, new, |d| edit::rename(d, old, new))?;
-        }
-        Command::Cp { src, dst } => {
-            let set = load_set(&path, false)?;
-            ensure_absent(&set, dst)?;
-            let target = owner(&set, src)?;
-            transaction(&target, w, dst, |d| edit::copy(d, src, dst))?;
-        }
-        _ => unreachable!("not an edit command"),
     }
-    Ok(())
 }
 
+/// Print a command's [`Output`]: its notes to stderr first, then its
+/// result to stdout.
+fn print(out: impl Into<Output>) -> Result<()> {
+    let out = out.into();
+    for note in &out.notes {
+        eprintln!("{note}");
+    }
+    write_stdout(out.stdout.as_bytes())
+}
+
+/// The exit code for an error, by its type (see [`exit`]).
 fn exit_code(e: &anyhow::Error) -> u8 {
     if e.downcast_ref::<NotFound>().is_some()
         || matches!(

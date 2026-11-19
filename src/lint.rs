@@ -30,9 +30,10 @@ use crate::include::ConfigSet;
 use crate::model::forward::{Endpoint, Forward, ForwardKind};
 use crate::model::keyword::{self, Merge};
 use crate::model::pattern::wildcard_match;
+use crate::model::rules;
 use crate::model::value::split_args;
-use crate::resolve::{ResolveContext, resolve};
-use crate::syntax::{BlockKind, LineKind};
+use crate::resolve::{Resolution, ResolveContext, resolve};
+use crate::syntax::{BlockKind, Line, LineKind};
 
 /// How serious a finding is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -90,8 +91,9 @@ pub fn lint(set: &ConfigSet, ctx: &LintContext) -> Vec<Finding> {
         out.push(finding("E005", &d.file, d.line, d.message.clone()));
     }
     duplicate_aliases(set, &mut out);
-    shadowed_options(set, ctx, &mut out);
-    forward_conflicts(set, ctx, &mut out);
+    let mut resolved = Resolutions::new(set, &ctx.local_user);
+    shadowed_options(set, &mut resolved, &mut out);
+    forward_conflicts(set, &mut resolved, &mut out);
 
     let order: HashMap<&Path, usize> = set
         .files()
@@ -140,6 +142,8 @@ fn ignore_unknown_patterns(set: &ConfigSet) -> Vec<String> {
         .collect()
 }
 
+/// Per-line checks for file `fid`: each line on its own, without looking
+/// at the rest of the configuration.
 fn line_checks(
     set: &ConfigSet,
     fid: usize,
@@ -149,214 +153,107 @@ fn line_checks(
 ) {
     let file = &set.files()[fid];
     let doc = &file.doc;
-    let path = file.path.as_path();
-
     for block in doc.blocks() {
         for idx in block.lines() {
             let line = &doc.lines()[idx];
-            let n = idx + 1;
-            let (kw, value) = match line.kind() {
-                LineKind::Invalid => {
-                    out.push(finding("E003", path, n, "line has no keyword".into()));
-                    continue;
+            let mut push = |code, message| out.push(finding(code, &file.path, idx + 1, message));
+            match line.kind() {
+                LineKind::Invalid => push("E003", "line has no keyword".into()),
+                LineKind::Directive(_) => {
+                    directive_checks(line, block.kind(), ignored, ctx, &mut push);
                 }
-                LineKind::Directive(_) => (
-                    line.keyword().unwrap_or_default(),
-                    line.value().unwrap_or_default(),
-                ),
-                LineKind::Blank | LineKind::Comment { .. } => continue,
-            };
-            let is_ignored = ignored
-                .iter()
-                .any(|p| wildcard_match(p, &kw.to_ascii_lowercase()));
-
-            let Some(canon) = keyword::canonical(kw) else {
-                if !is_ignored {
-                    let hint = keyword::hint(kw);
-                    out.push(finding(
-                        "E001",
-                        path,
-                        n,
-                        format!("unknown keyword `{kw}`{hint}"),
-                    ));
-                }
-                continue;
-            };
-            if canon == "UseKeychain" && !is_ignored {
-                out.push(finding("W006", path, n, "`UseKeychain` is only understood by macOS's ssh; add `IgnoreUnknown UseKeychain` before it so other systems accept this file".into()));
-            }
-
-            let args = match split_args(value) {
-                Ok(a) => a,
-                Err(e) => {
-                    out.push(finding("E003", path, n, format!("`{kw}`: {e}")));
-                    continue;
-                }
-            };
-            if args.is_empty() {
-                out.push(finding("E002", path, n, format!("`{canon}` needs a value")));
-                continue;
-            }
-            if let Some(msg) = check_value(canon, &args) {
-                out.push(finding("E002", path, n, msg));
-            }
-            if let Some(kind) = ForwardKind::from_keyword(canon)
-                && let Err(e) = Forward::from_config(kind, &args)
-            {
-                out.push(finding("E002", path, n, format!("`{canon}`: {e}")));
-            }
-            if canon == "Include" && block.kind() != BlockKind::Global {
-                out.push(finding("W005", path, n, "`Include` inside a Host/Match block only takes effect when that block applies; move it above the first Host line if it is meant to be global".into()));
-            }
-            if canon == "IdentityFile"
-                && ctx.check_files
-                && let Some(msg) = identity_problem(&args[0], &ctx.home)
-            {
-                out.push(finding("W003", path, n, msg));
+                LineKind::Blank | LineKind::Comment { .. } => {}
             }
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Value rules (each verified against `ssh -G`; see tests/lint_parity.rs)
-// ---------------------------------------------------------------------------
+/// Checks on one directive line in a block of kind `block`. Findings are
+/// reported through `push(code, message)`. Once a check finds the line
+/// unusable (unknown keyword, bad quoting, no value), later checks are
+/// skipped, since they would only repeat the problem.
+fn directive_checks(
+    line: &Line,
+    block: BlockKind,
+    ignored: &[String],
+    ctx: &LintContext,
+    push: &mut impl FnMut(&'static str, String),
+) {
+    let kw = line.keyword().unwrap_or_default();
+    let value = line.value().unwrap_or_default();
+    let is_ignored = ignored
+        .iter()
+        .any(|p| wildcard_match(p, &kw.to_ascii_lowercase()));
 
-/// Flags accepting yes/no/true/false.
-const FLAGS: &[&str] = &[
-    "BatchMode",
-    "CanonicalizeFallbackLocal",
-    "CheckHostIP",
-    "ClearAllForwardings",
-    "EnableEscapeCommandline",
-    "EnableSSHKeysign",
-    "ExitOnForwardFailure",
-    "ForkAfterAuthentication",
-    "ForwardX11",
-    "ForwardX11Trusted",
-    "GatewayPorts",
-    "GSSAPIAuthentication",
-    "GSSAPIDelegateCredentials",
-    "HashKnownHosts",
-    "HostbasedAuthentication",
-    "IdentitiesOnly",
-    "KbdInteractiveAuthentication",
-    "NoHostAuthenticationForLocalhost",
-    "PasswordAuthentication",
-    "PermitLocalCommand",
-    "ProxyUseFdpass",
-    "StdinNull",
-    "StreamLocalBindUnlink",
-    "TCPKeepAlive",
-    "VisualHostKey",
-];
-
-/// Single-valued keywords with a fixed set of choices (case-insensitive).
-const CHOICES: &[(&str, &[&str])] = &[
-    ("AddressFamily", &["any", "inet", "inet6"]),
-    ("Compression", &["yes", "no"]),
-    (
-        "ControlMaster",
-        &["yes", "no", "true", "false", "ask", "auto", "autoask"],
-    ),
-    (
-        "LogLevel",
-        &[
-            "quiet", "fatal", "error", "info", "verbose", "debug", "debug1", "debug2", "debug3",
-        ],
-    ),
-    (
-        "RequestTTY",
-        &["yes", "no", "true", "false", "force", "auto"],
-    ),
-    (
-        "StrictHostKeyChecking",
-        &["yes", "no", "true", "false", "ask", "accept-new", "off"],
-    ),
-    ("VerifyHostKeyDNS", &["yes", "no", "true", "false", "ask"]),
-];
-
-/// Non-negative integers (`ConnectionAttempts` must also be positive).
-const INTEGERS: &[&str] = &[
-    "CanonicalizeMaxDots",
-    "ConnectionAttempts",
-    "NumberOfPasswordPrompts",
-    "ServerAliveCountMax",
-];
-
-/// Time values: `30`, `1m`, `1h30m` (units s, m, h, d, w).
-const TIMES: &[&str] = &["ConnectTimeout", "ForwardX11Timeout", "ServerAliveInterval"];
-
-pub(crate) fn check_value(kw: &str, args: &[String]) -> Option<String> {
-    let single_valued = kw == "Port"
-        || FLAGS.contains(&kw)
-        || INTEGERS.contains(&kw)
-        || TIMES.contains(&kw)
-        || CHOICES.iter().any(|(k, _)| *k == kw);
-    if !single_valued {
-        return None;
-    }
-    if args.len() > 1 {
-        return Some(format!("`{kw}` takes a single value, got {}", args.len()));
-    }
-    let v = args[0].as_str();
-    let lower = v.to_ascii_lowercase();
-
-    let ok = if kw == "Port" {
-        // A number 1-65535, or a service name such as `ssh`.
-        if v.starts_with(|c: char| c.is_ascii_digit()) {
-            v.parse::<u16>().is_ok_and(|p| p > 0)
-        } else {
-            true
+    let Some(canon) = keyword::canonical(kw) else {
+        if !is_ignored {
+            let hint = keyword::hint(kw);
+            push("E001", format!("unknown keyword `{kw}`{hint}"));
         }
-    } else if FLAGS.contains(&kw) {
-        matches!(lower.as_str(), "yes" | "no" | "true" | "false")
-    } else if let Some((_, choices)) = CHOICES.iter().find(|(k, _)| *k == kw) {
-        choices.contains(&lower.as_str())
-    } else if INTEGERS.contains(&kw) {
-        v.parse::<u32>()
-            .is_ok_and(|n| kw != "ConnectionAttempts" || n > 0)
-    } else {
-        is_time(v)
+        return;
     };
-    (!ok).then(|| match kw {
-        "Port" => format!("`Port {v}`: must be a number from 1 to 65535 or a service name"),
-        _ if FLAGS.contains(&kw) => format!("`{kw} {v}`: must be yes or no"),
-        _ if INTEGERS.contains(&kw) => format!("`{kw} {v}`: must be a whole number"),
-        _ if TIMES.contains(&kw) => format!("`{kw} {v}`: must be a time such as 30, 90s, or 5m"),
-        _ => {
-            let choices = CHOICES
-                .iter()
-                .find(|(k, _)| *k == kw)
-                .map_or(&[][..], |(_, c)| c);
-            format!("`{kw} {v}`: must be one of {}", choices.join(", "))
-        }
-    })
-}
+    if canon == "UseKeychain" && !is_ignored {
+        push("W006", "`UseKeychain` is only understood by macOS's ssh; add `IgnoreUnknown UseKeychain` before it so other systems accept this file".into());
+    }
 
-/// OpenSSH `convtime` syntax: one or more `<digits>[smhdw]` groups.
-fn is_time(v: &str) -> bool {
-    let mut rest = v;
-    if rest.is_empty() {
-        return false;
+    let args = match split_args(value) {
+        Ok(a) => a,
+        Err(e) => return push("E003", format!("`{kw}`: {e}")),
+    };
+    if args.is_empty() {
+        return push("E002", format!("`{canon}` needs a value"));
     }
-    while !rest.is_empty() {
-        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-        if digits == 0 {
-            return false;
-        }
-        rest = &rest[digits..];
-        rest = rest
-            .strip_prefix(['s', 'S', 'm', 'M', 'h', 'H', 'd', 'D', 'w', 'W'])
-            .unwrap_or(rest);
+    if let Some(msg) = rules::check_value(canon, &args) {
+        push("E002", msg);
     }
-    true
+    if let Some(kind) = ForwardKind::from_keyword(canon)
+        && let Err(e) = Forward::from_config(kind, &args)
+    {
+        push("E002", format!("`{canon}`: {e}"));
+    }
+    if canon == "Include" && block != BlockKind::Global {
+        push("W005", "`Include` inside a Host/Match block only takes effect when that block applies; move it above the first Host line if it is meant to be global".into());
+    }
+    if canon == "IdentityFile"
+        && ctx.check_files
+        && let Some(msg) = identity_problem(&args[0], &ctx.home)
+    {
+        push("W003", msg);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Cross-block rules
 // ---------------------------------------------------------------------------
 
+/// Resolved settings per alias, computed on first use. W002 and W007 both
+/// resolve the aliases of every `Host` block; resolution walks the whole
+/// configuration, so each alias is resolved only once.
+struct Resolutions<'a> {
+    set: &'a ConfigSet,
+    ctx: ResolveContext,
+    cache: HashMap<String, Resolution>,
+}
+
+impl<'a> Resolutions<'a> {
+    fn new(set: &'a ConfigSet, local_user: &str) -> Self {
+        Self {
+            set,
+            ctx: ResolveContext {
+                local_user: local_user.to_owned(),
+            },
+            cache: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, alias: &str) -> &Resolution {
+        self.cache
+            .entry(alias.to_owned())
+            .or_insert_with(|| resolve(self.set, alias, &self.ctx))
+    }
+}
+
+/// W001: a literal alias named by more than one `Host` block.
 fn duplicate_aliases(set: &ConfigSet, out: &mut Vec<Finding>) {
     let mut first: HashMap<String, (PathBuf, usize)> = HashMap::new();
     for (fid, bi) in set.blocks_in_read_order() {
@@ -382,12 +279,9 @@ fn duplicate_aliases(set: &ConfigSet, out: &mut Vec<Finding>) {
     }
 }
 
-/// Options in a `Host` block that never take effect for the block's own
+/// W002: options in a `Host` block that never take effect for the block's own
 /// aliases because an earlier line (e.g. in `Host *`) sets them first.
-fn shadowed_options(set: &ConfigSet, ctx: &LintContext, out: &mut Vec<Finding>) {
-    let rctx = ResolveContext {
-        local_user: ctx.local_user.clone(),
-    };
+fn shadowed_options(set: &ConfigSet, resolved: &mut Resolutions<'_>, out: &mut Vec<Finding>) {
     for (fid, bi) in set.blocks_in_read_order() {
         let file = &set.files()[fid];
         let block = &file.doc.blocks()[bi];
@@ -405,7 +299,7 @@ fn shadowed_options(set: &ConfigSet, ctx: &LintContext, out: &mut Vec<Finding>) 
         if !patterns.matches(&alias) {
             continue; // e.g. `Host a !a`
         }
-        let res = resolve(set, &alias, &rctx);
+        let res = resolved.get(&alias);
         for idx in block.body() {
             let line = &file.doc.lines()[idx];
             let Some(kw) = line.keyword().and_then(keyword::canonical) else {
@@ -432,17 +326,14 @@ fn shadowed_options(set: &ConfigSet, ctx: &LintContext, out: &mut Vec<Finding>) 
     }
 }
 
-/// Two forwards that apply to the same host and listen on the same
+/// W007: two forwards that apply to the same host and listen on the same
 /// endpoint: the second fails with "Address already in use" (or aborts the
 /// connection under `ExitOnForwardFailure`). Local and dynamic forwards
 /// share the local side; remote forwards the remote side. Endpoints are
 /// compared as written (`8080` and `localhost:8080` are not unified), so
 /// there are no false positives; remote port 0 (server-assigned) never
 /// conflicts.
-fn forward_conflicts(set: &ConfigSet, ctx: &LintContext, out: &mut Vec<Finding>) {
-    let rctx = ResolveContext {
-        local_user: ctx.local_user.clone(),
-    };
+fn forward_conflicts(set: &ConfigSet, resolved: &mut Resolutions<'_>, out: &mut Vec<Finding>) {
     let mut reported = std::collections::HashSet::new();
     for (fid, bi) in set.blocks_in_read_order() {
         let file = &set.files()[fid];
@@ -455,7 +346,7 @@ fn forward_conflicts(set: &ConfigSet, ctx: &LintContext, out: &mut Vec<Finding>)
             .filter(|p| p.is_literal())
             .map(|p| p.glob.clone())
         {
-            let res = resolve(set, &alias, &rctx);
+            let res = resolved.get(&alias);
             let mut seen: HashMap<(bool, Endpoint), (PathBuf, usize)> = HashMap::new();
             for s in &res.settings {
                 let Some(kind) = ForwardKind::from_keyword(&s.keyword) else {
@@ -566,16 +457,6 @@ mod tests {
                 ("W002", 7), // second `Port` in the block: line 2 wins
             ]
         );
-    }
-
-    #[test]
-    fn time_syntax() {
-        for ok in ["0", "30", "1m", "1h30m", "2W"] {
-            assert!(is_time(ok), "{ok}");
-        }
-        for bad in ["", "m", "-1", "1x", "1.5m"] {
-            assert!(!is_time(bad), "{bad}");
-        }
     }
 
     #[test]

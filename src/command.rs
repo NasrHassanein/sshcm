@@ -410,7 +410,7 @@ fn apply_dash_o(arg: &str, opts: &mut Options) -> Result<(), CommandError> {
     // The same ssh-verified rules `lint` applies (values and forwards), so
     // `parse view` never prints a record ssh would reject.
     let args = split_args(value).map_err(|e| CommandError::Invalid(format!("-o {arg}: {e}")))?;
-    if let Some(msg) = crate::lint::check_value(kw, &args) {
+    if let Some(msg) = crate::model::rules::check_value(kw, &args) {
         return Err(CommandError::Invalid(format!("-o {arg}: {msg}")));
     }
     if let Some(kind) = ForwardKind::from_keyword(kw)
@@ -675,6 +675,12 @@ mod tests {
         assert!(err("ssh -o Hostnme=x h").contains("did you mean `HostName`"));
         assert!(err("ssh -o Host=x h").contains("cannot be set with -o"));
         assert!(err("ssh -o User= h").contains("missing value"));
+        // `#` starts a comment, so the value splits into no arguments. This
+        // used to panic with an index out of bounds.
+        assert_eq!(
+            err("ssh -o 'Port=#1' h"),
+            "-o Port=#1: `Port` needs a value"
+        );
         assert!(err("ssh -o Port=99999 h").contains("Port 99999"));
         assert!(err("ssh -o Compression=true h").contains("must be one of yes, no"));
         assert!(err("ssh -o LocalForward=8080:db:80 h").contains("LocalForward"));

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.1 — 2026-11-19
+
+Bug fixes, and a cleaner codebase.
+
+- Fixed a crash in `sshcm parse view|add` when an `-o` value starts with
+  `#`, such as `-o Port=#1`. ssh reads `#` as the start of a comment, so
+  the option has no value; sshcm now says so instead of panicking.
+- `sshcm forward list` and `sshcm parse view` no longer panic when their
+  output is piped into a command that stops reading early, such as `head`.
+- Backup file names keep the same timestamp format, now generated without
+  the unmaintained `humantime` crate (RUSTSEC-2026-0542).
+- Internal refactoring with no other change in behaviour: shared helpers
+  are written once, the CLI dispatches each subcommand in one place,
+  `edit` is split into submodules, and value checks live in one table in
+  `model::rules`.
+
 ## 0.4.0 — 2026-11-14
 
 One-line install.
